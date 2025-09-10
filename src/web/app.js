@@ -20,6 +20,13 @@ class DualAudioRecorderApp {
             }
         };
         
+        // Chronological transcription history for combined view
+        this.chronologicalTranscriptions = [];
+        this.currentInterimTranscriptions = {
+            system: { text: '', timestamp: null },
+            microphone: { text: '', timestamp: null }
+        };
+        
         this.currentTab = 'system';
         this.isElectron = this.detectElectron();
         
@@ -333,11 +340,14 @@ class DualAudioRecorderApp {
             }
         }
         
-        // Clear previous transcription
+        // Clear previous transcription for this source
         this.state[source].finalTranscription = '';
         this.state[source].interimTranscription = '';
         elements.transcriptionText.textContent = '';
         elements.transcriptionStatus.textContent = 'Listening for speech...';
+        
+        // Clear interim transcription for this source in combined view
+        this.currentInterimTranscriptions[source] = { text: '', timestamp: null };
         
         this.startTimer(source);
         this.updateCombinedStatus();
@@ -355,6 +365,10 @@ class DualAudioRecorderApp {
         elements.recordingStatus.classList.add('hidden');
         elements.startBtn.textContent = source === 'microphone' ? '🎤 Start Microphone' : '🖥️ Start System Audio';
         elements.transcriptionStatus.textContent = 'Recording stopped';
+        
+        // Clear interim transcription for this source
+        this.currentInterimTranscriptions[source] = { text: '', timestamp: null };
+        this.updateCombinedTranscription();
         
         this.stopTimer(source);
         this.updateCombinedStatus();
@@ -493,22 +507,42 @@ class DualAudioRecorderApp {
         
         elements.transcriptionSection.classList.remove('hidden');
         
+        // Handle individual source transcription display
         if (data.is_final) {
             sourceState.finalTranscription += data.text + ' ';
             sourceState.interimTranscription = '';
             elements.transcriptionStatus.textContent = 'Listening for speech...';
+            
+            // Add to chronological history for combined view
+            this.chronologicalTranscriptions.push({
+                source: source,
+                text: data.text,
+                timestamp: new Date(data.timestamp).getTime(),
+                is_final: true
+            });
+            
+            // Clear interim for this source
+            this.currentInterimTranscriptions[source] = { text: '', timestamp: null };
+            
         } else {
             sourceState.interimTranscription = data.text;
             elements.transcriptionStatus.textContent = 'Processing speech...';
+            
+            // Update interim transcription for combined view
+            this.currentInterimTranscriptions[source] = {
+                text: data.text,
+                timestamp: new Date(data.timestamp).getTime()
+            };
         }
         
+        // Update individual source display
         const displayText = sourceState.finalTranscription + sourceState.interimTranscription;
         elements.transcriptionText.textContent = displayText;
         
-        // Update combined view
+        // Update combined view with chronological ordering
         this.updateCombinedTranscription();
         
-        // Auto-scroll
+        // Auto-scroll individual source
         const transcriptionDisplay = document.getElementById(`${source}-transcription-display`);
         if (transcriptionDisplay) {
             transcriptionDisplay.scrollTop = transcriptionDisplay.scrollHeight;
@@ -520,19 +554,44 @@ class DualAudioRecorderApp {
     }
 
     updateCombinedTranscription() {
-        const systemText = (this.state.system.finalTranscription + this.state.system.interimTranscription).trim();
-        const microphoneText = (this.state.microphone.finalTranscription + this.state.microphone.interimTranscription).trim();
+        // Create a chronological list combining final and interim transcriptions
+        const allTranscriptions = [];
         
+        // Add all final transcriptions
+        this.chronologicalTranscriptions.forEach(trans => {
+            allTranscriptions.push(trans);
+        });
+        
+        // Add current interim transcriptions
+        Object.keys(this.currentInterimTranscriptions).forEach(source => {
+            const interim = this.currentInterimTranscriptions[source];
+            if (interim.text && interim.timestamp) {
+                allTranscriptions.push({
+                    source: source,
+                    text: interim.text,
+                    timestamp: interim.timestamp,
+                    is_final: false
+                });
+            }
+        });
+        
+        // Sort by timestamp
+        allTranscriptions.sort((a, b) => a.timestamp - b.timestamp);
+        
+        // Build the combined text with source labels
         let combinedText = '';
         
-        if (systemText && microphoneText) {
-            combinedText = `🖥️ System: ${systemText}\n\n🎤 Microphone: ${microphoneText}`;
-        } else if (systemText) {
-            combinedText = `🖥️ System: ${systemText}`;
-        } else if (microphoneText) {
-            combinedText = `🎤 Microphone: ${microphoneText}`;
-        } else {
+        if (allTranscriptions.length === 0) {
             combinedText = 'Combined transcription will appear here when either source is active...';
+        } else {
+            allTranscriptions.forEach(trans => {
+                const sourceLabel = trans.source === 'system' ? '🖥️ System' : '🎤 Microphone';
+                const finalityIndicator = trans.is_final ? '' : ' (...)';
+                combinedText += `${sourceLabel}: ${trans.text}${finalityIndicator}\n`;
+            });
+            
+            // Remove trailing newline
+            combinedText = combinedText.trim();
         }
         
         this.combinedElements.transcriptionText.textContent = combinedText;
@@ -542,6 +601,16 @@ class DualAudioRecorderApp {
         if (combinedDisplay) {
             combinedDisplay.scrollTop = combinedDisplay.scrollHeight;
         }
+    }
+
+    // Clear chronological transcription history when recordings start
+    clearCombinedTranscriptionHistory() {
+        this.chronologicalTranscriptions = [];
+        this.currentInterimTranscriptions = {
+            system: { text: '', timestamp: null },
+            microphone: { text: '', timestamp: null }
+        };
+        this.updateCombinedTranscription();
     }
 }
 
@@ -578,14 +647,17 @@ function clearTranscription(source) {
     if (!app) return;
     
     if (source === 'combined') {
-        app.combinedElements.transcriptionText.textContent = 'Combined transcription will appear here when either source is active...';
-        app.combinedElements.transcriptionText.className += ' text-gray-400 italic';
+        app.clearCombinedTranscriptionHistory();
     } else {
         const elements = source === 'microphone' ? app.microphoneElements : app.systemElements;
         app.state[source].finalTranscription = '';
         app.state[source].interimTranscription = '';
         elements.transcriptionText.textContent = `${source === 'microphone' ? 'Microphone' : 'System audio'} transcription will appear here...`;
         elements.transcriptionText.className += ' text-gray-400 italic';
+        
+        // Also clear from combined view history
+        app.chronologicalTranscriptions = app.chronologicalTranscriptions.filter(trans => trans.source !== source);
+        app.currentInterimTranscriptions[source] = { text: '', timestamp: null };
         app.updateCombinedTranscription();
     }
 }
