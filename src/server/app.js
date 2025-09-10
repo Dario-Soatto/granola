@@ -6,7 +6,7 @@ const path = require('path');
 require('dotenv').config();
 
 const { checkPermissions } = require('../electron/utils/permission');
-const { startRecording, stopRecording } = require('../electron/utils/recording');
+const { startRecording, stopRecording, isRecordingActive, getActiveSources } = require('../electron/utils/recording');
 
 const app = express();
 const server = http.createServer(app);
@@ -24,7 +24,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../web')));
 
-// Store recording state - enhanced for dual audio sources
+// Store recording state - enhanced for concurrent dual audio sources
 let recordingState = {
   system: {
     isRecording: false,
@@ -37,38 +37,49 @@ let recordingState = {
     startTime: null,
     streaming: false,
     audioFormat: null
-  },
-  // Legacy properties for backward compatibility
-  isRecording: false,
-  startTime: null,
-  streaming: false,
-  audioFormat: null
+  }
 };
 
 // Make io and recordingState available globally for recording.js
 global.io = io;
 global.recordingState = recordingState;
 
-// Helper function to update legacy state properties
-function updateLegacyState() {
-  recordingState.isRecording = recordingState.system.isRecording || recordingState.microphone.isRecording;
-  recordingState.startTime = recordingState.system.startTime || recordingState.microphone.startTime;
-  recordingState.streaming = recordingState.system.streaming || recordingState.microphone.streaming;
-  recordingState.audioFormat = recordingState.system.audioFormat || recordingState.microphone.audioFormat;
+// Helper function to update recording state for a specific source
+function updateRecordingState(source, isRecording, startTime = null, audioFormat = null) {
+  if (recordingState[source]) {
+    recordingState[source].isRecording = isRecording;
+    recordingState[source].startTime = startTime;
+    recordingState[source].streaming = isRecording;
+    recordingState[source].audioFormat = audioFormat;
+  }
 }
 
 // API Routes
 app.get('/api/status', (req, res) => {
-  updateLegacyState();
+  // Get real-time status from the recording utility
+  const activeSources = getActiveSources();
+  
+  // Update our state based on actual recording status
+  Object.keys(recordingState).forEach(source => {
+    const isActive = activeSources.includes(source);
+    if (recordingState[source].isRecording !== isActive) {
+      recordingState[source].isRecording = isActive;
+      recordingState[source].streaming = isActive;
+    }
+  });
+
   res.json({
     // Current state with dual source support
     system: recordingState.system,
     microphone: recordingState.microphone,
+    // Summary information
+    activeCount: activeSources.length,
+    activeSources: activeSources,
     // Legacy properties for backward compatibility
-    isRecording: recordingState.isRecording,
-    startTime: recordingState.startTime,
-    streaming: recordingState.streaming,
-    audioFormat: recordingState.audioFormat
+    isRecording: recordingState.system.isRecording || recordingState.microphone.isRecording,
+    startTime: recordingState.system.startTime || recordingState.microphone.startTime,
+    streaming: recordingState.system.streaming || recordingState.microphone.streaming,
+    audioFormat: recordingState.system.audioFormat || recordingState.microphone.audioFormat
   });
 });
 
@@ -81,7 +92,7 @@ app.get('/api/permissions', async (req, res) => {
   }
 });
 
-// System Audio Recording (existing endpoint - updated)
+// System Audio Recording (updated for concurrent support)
 app.post('/api/recording/start', async (req, res) => {
   try {
     // Check for DeepGram API key
@@ -91,12 +102,19 @@ app.post('/api/recording/start', async (req, res) => {
       });
     }
 
+    // Check if system recording is already active
+    if (isRecordingActive('system')) {
+      return res.status(400).json({
+        error: 'System audio recording is already active',
+        source: 'system',
+        success: false
+      });
+    }
+
     console.log('API: Starting system audio streaming recording...');
 
     // Update recording state
-    recordingState.system.isRecording = true;
-    recordingState.system.startTime = Date.now();
-    recordingState.system.streaming = true;
+    updateRecordingState('system', true, Date.now());
 
     // Start system audio streaming recording
     const result = await startRecording('system');
@@ -104,13 +122,12 @@ app.post('/api/recording/start', async (req, res) => {
     console.log('API: System audio streaming started successfully');
     
     // Update state with result
-    recordingState.system.audioFormat = result.audioFormat;
-    updateLegacyState();
+    updateRecordingState('system', true, result.timestamp, result.audioFormat);
     
     res.json({ 
       success: true, 
       source: 'system',
-      startTime: recordingState.system.startTime,
+      startTime: result.timestamp,
       streaming: true,
       audioFormat: result.audioFormat,
       message: 'System audio streaming recording started successfully'
@@ -118,10 +135,7 @@ app.post('/api/recording/start', async (req, res) => {
   } catch (error) {
     console.error('API: System audio recording start error:', error.message);
     
-    recordingState.system.isRecording = false;
-    recordingState.system.startTime = null;
-    recordingState.system.streaming = false;
-    updateLegacyState();
+    updateRecordingState('system', false);
     
     // Emit error to all connected clients
     io.emit('recording-error', { message: error.message, source: 'system' });
@@ -134,7 +148,7 @@ app.post('/api/recording/start', async (req, res) => {
   }
 });
 
-// Microphone Recording (new endpoint)
+// Microphone Recording (updated for concurrent support)
 app.post('/api/recording/microphone/start', async (req, res) => {
   try {
     // Check for DeepGram API key
@@ -144,12 +158,19 @@ app.post('/api/recording/microphone/start', async (req, res) => {
       });
     }
 
+    // Check if microphone recording is already active
+    if (isRecordingActive('microphone')) {
+      return res.status(400).json({
+        error: 'Microphone recording is already active',
+        source: 'microphone',
+        success: false
+      });
+    }
+
     console.log('API: Starting microphone streaming recording...');
 
     // Update recording state
-    recordingState.microphone.isRecording = true;
-    recordingState.microphone.startTime = Date.now();
-    recordingState.microphone.streaming = true;
+    updateRecordingState('microphone', true, Date.now());
 
     // Start microphone streaming recording
     const result = await startRecording('microphone');
@@ -157,13 +178,12 @@ app.post('/api/recording/microphone/start', async (req, res) => {
     console.log('API: Microphone streaming started successfully');
     
     // Update state with result
-    recordingState.microphone.audioFormat = result.audioFormat;
-    updateLegacyState();
+    updateRecordingState('microphone', true, result.timestamp, result.audioFormat);
     
     res.json({ 
       success: true, 
       source: 'microphone',
-      startTime: recordingState.microphone.startTime,
+      startTime: result.timestamp,
       streaming: true,
       audioFormat: result.audioFormat,
       message: 'Microphone streaming recording started successfully'
@@ -171,10 +191,7 @@ app.post('/api/recording/microphone/start', async (req, res) => {
   } catch (error) {
     console.error('API: Microphone recording start error:', error.message);
     
-    recordingState.microphone.isRecording = false;
-    recordingState.microphone.startTime = null;
-    recordingState.microphone.streaming = false;
-    updateLegacyState();
+    updateRecordingState('microphone', false);
     
     // Emit error to all connected clients
     io.emit('recording-error', { message: error.message, source: 'microphone' });
@@ -190,13 +207,17 @@ app.post('/api/recording/microphone/start', async (req, res) => {
 // Stop System Audio Recording
 app.post('/api/recording/stop', (req, res) => {
   try {
-    stopRecording();
+    if (!isRecordingActive('system')) {
+      return res.status(400).json({
+        error: 'System audio recording is not active',
+        source: 'system',
+        success: false
+      });
+    }
+
+    stopRecording('system');
     
-    recordingState.system.isRecording = false;
-    recordingState.system.startTime = null;
-    recordingState.system.streaming = false;
-    recordingState.system.audioFormat = null;
-    updateLegacyState();
+    updateRecordingState('system', false);
     
     // Emit to all connected clients
     io.emit('recording-stopped', { source: 'system' });
@@ -210,13 +231,17 @@ app.post('/api/recording/stop', (req, res) => {
 // Stop Microphone Recording
 app.post('/api/recording/microphone/stop', (req, res) => {
   try {
-    stopRecording();
+    if (!isRecordingActive('microphone')) {
+      return res.status(400).json({
+        error: 'Microphone recording is not active',
+        source: 'microphone',
+        success: false
+      });
+    }
+
+    stopRecording('microphone');
     
-    recordingState.microphone.isRecording = false;
-    recordingState.microphone.startTime = null;
-    recordingState.microphone.streaming = false;
-    recordingState.microphone.audioFormat = null;
-    updateLegacyState();
+    updateRecordingState('microphone', false);
     
     // Emit to all connected clients
     io.emit('recording-stopped', { source: 'microphone' });
@@ -227,28 +252,116 @@ app.post('/api/recording/microphone/stop', (req, res) => {
   }
 });
 
+// Start Both Sources Simultaneously
+app.post('/api/recording/start-both', async (req, res) => {
+  try {
+    // Check for DeepGram API key
+    if (!process.env.DEEPGRAM_API_KEY) {
+      return res.status(500).json({ 
+        error: 'DEEPGRAM_API_KEY environment variable is required' 
+      });
+    }
+
+    console.log('API: Starting both audio sources simultaneously...');
+
+    const results = {};
+    const errors = {};
+
+    // Start system audio if not already active
+    if (!isRecordingActive('system')) {
+      try {
+        updateRecordingState('system', true, Date.now());
+        const systemResult = await startRecording('system');
+        updateRecordingState('system', true, systemResult.timestamp, systemResult.audioFormat);
+        results.system = systemResult;
+        console.log('API: System audio started successfully');
+      } catch (error) {
+        updateRecordingState('system', false);
+        errors.system = error.message;
+        console.error('API: System audio start failed:', error.message);
+      }
+    } else {
+      results.system = { message: 'Already active' };
+    }
+
+    // Start microphone if not already active
+    if (!isRecordingActive('microphone')) {
+      try {
+        updateRecordingState('microphone', true, Date.now());
+        const microphoneResult = await startRecording('microphone');
+        updateRecordingState('microphone', true, microphoneResult.timestamp, microphoneResult.audioFormat);
+        results.microphone = microphoneResult;
+        console.log('API: Microphone started successfully');
+      } catch (error) {
+        updateRecordingState('microphone', false);
+        errors.microphone = error.message;
+        console.error('API: Microphone start failed:', error.message);
+      }
+    } else {
+      results.microphone = { message: 'Already active' };
+    }
+
+    const hasErrors = Object.keys(errors).length > 0;
+    const hasSuccess = Object.keys(results).length > 0;
+
+    if (hasErrors && !hasSuccess) {
+      // Complete failure
+      res.status(500).json({
+        success: false,
+        errors: errors,
+        message: 'Failed to start any audio sources'
+      });
+    } else {
+      // Partial or complete success
+      res.json({
+        success: true,
+        results: results,
+        errors: hasErrors ? errors : undefined,
+        message: hasErrors ? 'Partial success - some sources failed to start' : 'Both audio sources started successfully'
+      });
+    }
+
+  } catch (error) {
+    console.error('API: Start both error:', error.message);
+    res.status(500).json({ 
+      error: error.message,
+      success: false 
+    });
+  }
+});
+
 // Stop All Recording
 app.post('/api/recording/stop-all', (req, res) => {
   try {
-    stopRecording();
+    const activeSources = getActiveSources();
+    
+    if (activeSources.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No active recordings to stop',
+        stoppedSources: []
+      });
+    }
+
+    console.log(`API: Stopping all active recordings: ${activeSources.join(', ')}`);
+
+    // Stop all recordings
+    stopRecording(); // No parameter stops all sources
     
     // Reset all recording states
-    recordingState.system.isRecording = false;
-    recordingState.system.startTime = null;
-    recordingState.system.streaming = false;
-    recordingState.system.audioFormat = null;
-    
-    recordingState.microphone.isRecording = false;
-    recordingState.microphone.startTime = null;
-    recordingState.microphone.streaming = false;
-    recordingState.microphone.audioFormat = null;
-    
-    updateLegacyState();
+    Object.keys(recordingState).forEach(source => {
+      updateRecordingState(source, false);
+    });
     
     // Emit to all connected clients
-    io.emit('recording-stopped', { source: 'all' });
+    io.emit('recording-stopped', { source: 'all', stoppedSources: activeSources });
     
-    res.json({ success: true, source: 'all' });
+    res.json({ 
+      success: true, 
+      source: 'all',
+      stoppedSources: activeSources,
+      message: `Stopped ${activeSources.length} active recording(s)`
+    });
   } catch (error) {
     res.status(500).json({ error: error.message, source: 'all' });
   }
@@ -274,21 +387,41 @@ app.get('/api/permissions/:type', async (req, res) => {
   }
 });
 
+// Get current recording status for specific source
+app.get('/api/recording/:source/status', (req, res) => {
+  const source = req.params.source;
+  
+  if (!recordingState[source]) {
+    return res.status(400).json({ error: `Invalid source: ${source}` });
+  }
+
+  const isActive = isRecordingActive(source);
+  
+  res.json({
+    source: source,
+    isRecording: isActive,
+    isActive: isActive,
+    ...recordingState[source]
+  });
+});
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  updateLegacyState();
+  const activeSources = getActiveSources();
+  
   res.json({ 
     status: 'ok',
     deepgram: !!process.env.DEEPGRAM_API_KEY,
     recording: {
-      system: recordingState.system.isRecording,
-      microphone: recordingState.microphone.isRecording,
-      any: recordingState.isRecording
+      system: isRecordingActive('system'),
+      microphone: isRecordingActive('microphone'),
+      activeCount: activeSources.length,
+      activeSources: activeSources
     },
     streaming: {
       system: recordingState.system.streaming,
       microphone: recordingState.microphone.streaming,
-      any: recordingState.streaming
+      any: recordingState.system.streaming || recordingState.microphone.streaming
     }
   });
 });
@@ -297,16 +430,26 @@ app.get('/api/health', (req, res) => {
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
   
-  updateLegacyState();
+  // Get current active sources
+  const activeSources = getActiveSources();
+  
+  // Update state based on actual recording status
+  Object.keys(recordingState).forEach(source => {
+    const isActive = activeSources.includes(source);
+    recordingState[source].isRecording = isActive;
+    recordingState[source].streaming = isActive;
+  });
+  
   // Send current state to newly connected client
   socket.emit('state-update', {
     system: recordingState.system,
     microphone: recordingState.microphone,
+    activeSources: activeSources,
     // Legacy properties
-    isRecording: recordingState.isRecording,
-    startTime: recordingState.startTime,
-    streaming: recordingState.streaming,
-    audioFormat: recordingState.audioFormat
+    isRecording: recordingState.system.isRecording || recordingState.microphone.isRecording,
+    startTime: recordingState.system.startTime || recordingState.microphone.startTime,
+    streaming: recordingState.system.streaming || recordingState.microphone.streaming,
+    audioFormat: recordingState.system.audioFormat || recordingState.microphone.audioFormat
   });
   
   socket.on('disconnect', () => {

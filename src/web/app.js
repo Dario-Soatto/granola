@@ -99,7 +99,7 @@ class DualAudioRecorderApp {
         this.microphoneElements.startBtn.addEventListener('click', () => this.startRecording('microphone'));
         this.microphoneElements.stopBtn.addEventListener('click', () => this.stopRecording('microphone'));
 
-        // Combined controls
+        // Combined controls - updated for concurrent operations
         this.combinedElements.startBothBtn.addEventListener('click', () => this.startBoth());
         this.combinedElements.stopAllBtn.addEventListener('click', () => this.stopAll());
     }
@@ -115,8 +115,15 @@ class DualAudioRecorderApp {
         });
 
         this.socket.on('recording-stopped', (data) => {
-            const source = data.source || 'system';
-            this.handleRecordingStopped(source);
+            if (data.source === 'all') {
+                // Handle stop-all case
+                data.stoppedSources?.forEach(source => {
+                    this.handleRecordingStopped(source);
+                });
+            } else {
+                const source = data.source || 'system';
+                this.handleRecordingStopped(source);
+            }
         });
 
         this.socket.on('permission-denied', () => {
@@ -129,7 +136,7 @@ class DualAudioRecorderApp {
         });
 
         this.socket.on('transcription-chunk', (data) => {
-            // Now handle transcription based on the source information
+            // Handle transcription based on the source information
             const source = data.source || 'system';
             this.handleTranscriptionChunk(source, data);
         });
@@ -188,6 +195,7 @@ class DualAudioRecorderApp {
         const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
         
         try {
+            // Update UI immediately for better responsiveness
             elements.startBtn.disabled = true;
             elements.startBtn.textContent = 'Starting...';
 
@@ -209,6 +217,8 @@ class DualAudioRecorderApp {
         } catch (error) {
             console.error(`Error starting ${source} recording:`, error);
             alert(`Error starting ${source} recording: ` + error.message);
+            
+            // Reset UI on error
             elements.startBtn.disabled = false;
             elements.startBtn.textContent = source === 'microphone' ? '🎤 Start Microphone' : '🖥️ Start System Audio';
         }
@@ -222,9 +232,13 @@ class DualAudioRecorderApp {
                 method: 'POST',
             });
 
+            const data = await response.json();
+
             if (!response.ok) {
-                throw new Error(`Failed to stop ${source} recording`);
+                throw new Error(data.error || `Failed to stop ${source} recording`);
             }
+
+            console.log(`${source} recording stopped:`, data);
 
         } catch (error) {
             console.error(`Error stopping ${source} recording:`, error);
@@ -234,34 +248,68 @@ class DualAudioRecorderApp {
 
     async startBoth() {
         this.combinedElements.startBothBtn.disabled = true;
-        this.combinedElements.startBothBtn.textContent = 'Starting...';
+        this.combinedElements.startBothBtn.textContent = 'Starting Both...';
         
         try {
-            await Promise.all([
-                this.startRecording('system'),
-                this.startRecording('microphone')
-            ]);
+            console.log('Starting both audio sources...');
+            
+            const response = await fetch('/api/recording/start-both', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to start both recordings');
+            }
+
+            console.log('Both recordings started:', data);
+
+            // Show results to user
+            if (data.errors && Object.keys(data.errors).length > 0) {
+                const errorMessages = Object.entries(data.errors)
+                    .map(([source, error]) => `${source}: ${error}`)
+                    .join('\n');
+                alert(`Partial success. Some sources failed:\n${errorMessages}`);
+            } else {
+                console.log('Both audio sources started successfully');
+            }
+
         } catch (error) {
             console.error('Error starting both recordings:', error);
+            alert('Error starting both recordings: ' + error.message);
         } finally {
-            this.combinedElements.startBothBtn.disabled = false;
-            this.combinedElements.startBothBtn.textContent = '🚀 Start Both';
+            // Reset button state
+            this.updateCombinedControls();
         }
     }
 
     async stopAll() {
+        this.combinedElements.stopAllBtn.disabled = true;
+        this.combinedElements.stopAllBtn.textContent = 'Stopping All...';
+        
         try {
             const response = await fetch('/api/recording/stop-all', {
                 method: 'POST',
             });
 
+            const data = await response.json();
+
             if (!response.ok) {
-                throw new Error('Failed to stop all recordings');
+                throw new Error(data.error || 'Failed to stop all recordings');
             }
+
+            console.log('All recordings stopped:', data);
 
         } catch (error) {
             console.error('Error stopping all recordings:', error);
             alert('Error stopping all recordings: ' + error.message);
+        } finally {
+            // Reset button state
+            this.updateCombinedControls();
         }
     }
 
@@ -293,6 +341,7 @@ class DualAudioRecorderApp {
         
         this.startTimer(source);
         this.updateCombinedStatus();
+        this.updateCombinedControls();
     }
 
     handleRecordingStopped(source) {
@@ -309,18 +358,19 @@ class DualAudioRecorderApp {
         
         this.stopTimer(source);
         this.updateCombinedStatus();
+        this.updateCombinedControls();
     }
 
     handleRecordingError(source, message) {
         alert(`${source} Recording Error: ` + message);
         this.state[source].isRecording = false;
         this.updateRecordingUI(source);
+        this.updateCombinedControls();
     }
 
     updateUI(state) {
-        // Handle legacy state structure and new dual-source structure
+        // Handle new dual-source state structure
         if (state.system && state.microphone) {
-            // New dual-source state
             this.updateSourceState('system', state.system);
             this.updateSourceState('microphone', state.microphone);
         } else {
@@ -329,6 +379,7 @@ class DualAudioRecorderApp {
         }
         
         this.updateCombinedStatus();
+        this.updateCombinedControls();
     }
 
     updateSourceState(source, sourceState) {
@@ -380,6 +431,35 @@ class DualAudioRecorderApp {
         // Update status colors
         this.combinedElements.systemStatus.className = this.state.system.isRecording ? 'ml-2 font-medium text-green-600' : 'ml-2 font-medium text-gray-500';
         this.combinedElements.microphoneStatus.className = this.state.microphone.isRecording ? 'ml-2 font-medium text-green-600' : 'ml-2 font-medium text-gray-500';
+    }
+
+    updateCombinedControls() {
+        const systemActive = this.state.system.isRecording;
+        const microphoneActive = this.state.microphone.isRecording;
+        const anyActive = systemActive || microphoneActive;
+        const bothActive = systemActive && microphoneActive;
+
+        // Start Both button
+        if (bothActive) {
+            this.combinedElements.startBothBtn.disabled = true;
+            this.combinedElements.startBothBtn.textContent = '✅ Both Active';
+        } else if (anyActive) {
+            this.combinedElements.startBothBtn.disabled = false;
+            this.combinedElements.startBothBtn.textContent = systemActive ? '🎤 Add Microphone' : '🖥️ Add System Audio';
+        } else {
+            this.combinedElements.startBothBtn.disabled = false;
+            this.combinedElements.startBothBtn.textContent = '🚀 Start Both';
+        }
+
+        // Stop All button
+        this.combinedElements.stopAllBtn.disabled = !anyActive;
+        if (bothActive) {
+            this.combinedElements.stopAllBtn.textContent = '⏹️ Stop Both';
+        } else if (anyActive) {
+            this.combinedElements.stopAllBtn.textContent = systemActive ? '⏹️ Stop System' : '⏹️ Stop Microphone';
+        } else {
+            this.combinedElements.stopAllBtn.textContent = '⏹️ Stop All';
+        }
     }
 
     startTimer(source) {

@@ -2,30 +2,44 @@ const { spawn } = require("node:child_process");
 const { checkPermissions } = require("./permission");
 const { createClient } = require('@deepgram/sdk');
 
-let recordingProcess = null;
+// Global DeepGram client (shared)
 let deepgramClient = null;
-let deepgramConnection = null;
-let audioFormat = null;
-let currentAudioSource = 'system'; // Track which source is currently active
 
-// Initialize DeepGram client
-function initializeDeepGram() {
-  if (!process.env.DEEPGRAM_API_KEY) {
-    throw new Error('DEEPGRAM_API_KEY environment variable is required');
+// Recording state for each audio source
+const recordingStates = {
+  system: {
+    process: null,
+    deepgramConnection: null,
+    audioFormat: null,
+    audioStreamParser: null,
+    isActive: false
+  },
+  microphone: {
+    process: null,
+    deepgramConnection: null,
+    audioFormat: null,
+    audioStreamParser: null,
+    isActive: false
   }
-  
-  deepgramClient = createClient(process.env.DEEPGRAM_API_KEY);
-  console.log('DeepGram client initialized');
+};
+
+// Initialize DeepGram client (shared between both sources)
+function initializeDeepGram() {
+  if (!deepgramClient) {
+    if (!process.env.DEEPGRAM_API_KEY) {
+      throw new Error('DEEPGRAM_API_KEY environment variable is required');
+    }
+    
+    deepgramClient = createClient(process.env.DEEPGRAM_API_KEY);
+    console.log('DeepGram client initialized');
+  }
 }
 
-// Start DeepGram streaming connection
-function startDeepGramStream(audioSource = 'system') {
+// Start DeepGram streaming connection for a specific source
+function startDeepGramStream(audioSource) {
   if (!deepgramClient) {
     initializeDeepGram();
   }
-
-  // Store the audio source for transcription routing
-  currentAudioSource = audioSource;
 
   // DeepGram streaming configuration
   const deepgramConfig = {
@@ -41,14 +55,14 @@ function startDeepGramStream(audioSource = 'system') {
   };
 
   console.log(`Starting DeepGram streaming connection for ${audioSource}...`);
-  deepgramConnection = deepgramClient.listen.live(deepgramConfig);
+  const connection = deepgramClient.listen.live(deepgramConfig);
 
   // Handle DeepGram responses
-  deepgramConnection.on('open', () => {
+  connection.on('open', () => {
     console.log(`DeepGram connection opened for ${audioSource}`);
   });
 
-  deepgramConnection.on('Results', (data) => {
+  connection.on('Results', (data) => {
     const result = data.channel.alternatives[0];
     if (result && result.transcript) {
       const transcriptionData = {
@@ -56,10 +70,10 @@ function startDeepGramStream(audioSource = 'system') {
         is_final: data.is_final,
         confidence: result.confidence,
         timestamp: new Date().toISOString(),
-        source: currentAudioSource // Include source information
+        source: audioSource
       };
 
-      console.log(`DeepGram ${currentAudioSource} ${data.is_final ? 'FINAL' : 'interim'}:`, result.transcript);
+      console.log(`DeepGram ${audioSource} ${data.is_final ? 'FINAL' : 'interim'}:`, result.transcript);
 
       // Send transcription to clients via Socket.io with source information
       if (global.io) {
@@ -68,34 +82,34 @@ function startDeepGramStream(audioSource = 'system') {
     }
   });
 
-  deepgramConnection.on('Metadata', (data) => {
-    console.log(`DeepGram ${currentAudioSource} metadata:`, data);
+  connection.on('Metadata', (data) => {
+    console.log(`DeepGram ${audioSource} metadata:`, data);
   });
 
-  deepgramConnection.on('Error', (error) => {
-    console.error(`DeepGram ${currentAudioSource} error:`, error);
+  connection.on('Error', (error) => {
+    console.error(`DeepGram ${audioSource} error:`, error);
     
     // Emit error to web clients
     if (global.io) {
-      global.io.emit('transcription-error', { message: error.message, source: currentAudioSource });
+      global.io.emit('transcription-error', { message: error.message, source: audioSource });
     }
   });
 
-  deepgramConnection.on('Close', () => {
-    console.log(`DeepGram ${currentAudioSource} connection closed`);
+  connection.on('Close', () => {
+    console.log(`DeepGram ${audioSource} connection closed`);
   });
 
-  return deepgramConnection;
+  return connection;
 }
 
-// Stop DeepGram streaming
-function stopDeepGramStream() {
-  if (deepgramConnection) {
-    console.log(`Closing DeepGram connection for ${currentAudioSource}...`);
-    deepgramConnection.finish();
-    deepgramConnection = null;
+// Stop DeepGram streaming for a specific source
+function stopDeepGramStream(audioSource) {
+  const state = recordingStates[audioSource];
+  if (state.deepgramConnection) {
+    console.log(`Closing DeepGram connection for ${audioSource}...`);
+    state.deepgramConnection.finish();
+    state.deepgramConnection = null;
   }
-  currentAudioSource = 'system'; // Reset to default
 }
 
 // Parse binary audio stream from Swift with source identification
@@ -149,9 +163,17 @@ class AudioStreamParser {
   }
 }
 
-const initStreaming = (audioSource = 'system') => {
+const initStreaming = (audioSource) => {
   return new Promise((resolve, reject) => {
     console.log(`Starting ${audioSource} audio streaming process...`);
+    
+    const state = recordingStates[audioSource];
+    
+    // Check if this source is already active
+    if (state.isActive) {
+      reject(new Error(`${audioSource} recording is already active`));
+      return;
+    }
     
     // Build command arguments based on audio source
     const args = ['--stream'];
@@ -160,25 +182,23 @@ const initStreaming = (audioSource = 'system') => {
     }
     
     // Start Swift recorder with appropriate arguments
-    recordingProcess = spawn("./src/swift/Recorder", args);
+    state.process = spawn("./src/swift/Recorder", args);
+    state.audioStreamParser = new AudioStreamParser();
+    state.isActive = true;
     
     let hasResolved = false;
-    let audioStreamParser = new AudioStreamParser();
 
     const timeout = setTimeout(() => {
       if (!hasResolved) {
         hasResolved = true;
-        console.error('Recording process timed out after 10 seconds');
-        if (recordingProcess) {
-          recordingProcess.kill('SIGKILL');
-          recordingProcess = null;
-        }
-        reject(new Error('Recording process timed out - this may indicate a system permissions issue'));
+        console.error(`${audioSource} recording process timed out after 10 seconds`);
+        cleanupRecording(audioSource);
+        reject(new Error(`${audioSource} recording process timed out - this may indicate a permissions issue`));
       }
     }, 10000);
 
     // Handle JSON status messages from stderr
-    recordingProcess.stderr.on("data", (data) => {
+    state.process.stderr.on("data", (data) => {
       try {
         const lines = data.toString().split("\n").filter((line) => line.trim() !== "");
         
@@ -190,29 +210,25 @@ const initStreaming = (audioSource = 'system') => {
 
           try {
             const response = JSON.parse(line);
-            console.log('Swift recorder status:', response);
+            console.log(`Swift ${audioSource} recorder status:`, response);
             
             if (response.code === "RECORDING_STARTED") {
               if (!hasResolved) {
                 clearTimeout(timeout);
                 hasResolved = true;
                 
-                audioFormat = response.audio_format;
+                state.audioFormat = response.audio_format;
                 const timestamp = new Date(response.timestamp).getTime();
-                const source = response.source || 'system'; // Fallback for backward compatibility
+                const source = response.source || audioSource;
 
-                // Start DeepGram streaming with the correct source
+                // Start DeepGram streaming for this source
                 try {
-                  startDeepGramStream(source);
+                  state.deepgramConnection = startDeepGramStream(source);
                 } catch (error) {
-                  console.error('Failed to start DeepGram:', error);
+                  console.error(`Failed to start DeepGram for ${audioSource}:`, error);
+                  cleanupRecording(audioSource);
                   reject(error);
                   return;
-                }
-
-                // Send to Electron window if it exists
-                if (global.mainWindow && global.mainWindow.webContents) {
-                  global.mainWindow.webContents.send("recording-status", "START_RECORDING", timestamp, "streaming");
                 }
 
                 // Send to web clients via Socket.io
@@ -220,20 +236,12 @@ const initStreaming = (audioSource = 'system') => {
                   global.io.emit('recording-started', {
                     startTime: timestamp,
                     streaming: true,
-                    audioFormat: audioFormat,
+                    audioFormat: state.audioFormat,
                     source: source
                   });
                 }
 
-                // Update global recording state
-                if (global.recordingState) {
-                  global.recordingState.isRecording = true;
-                  global.recordingState.startTime = timestamp;
-                  global.recordingState.outputPath = 'streaming';
-                  global.recordingState.source = source;
-                }
-
-                resolve({ success: true, streaming: true, timestamp, audioFormat, source });
+                resolve({ success: true, streaming: true, timestamp, audioFormat: state.audioFormat, source });
               }
               return;
             }
@@ -241,24 +249,13 @@ const initStreaming = (audioSource = 'system') => {
             if (response.code === "RECORDING_STOPPED") {
               const timestamp = new Date(response.timestamp).getTime();
 
-              // Stop DeepGram streaming
-              stopDeepGramStream();
-
-              // Send to Electron window if it exists
-              if (global.mainWindow && global.mainWindow.webContents) {
-                global.mainWindow.webContents.send("recording-status", "STOP_RECORDING", timestamp, "streaming");
-              }
+              // Stop DeepGram streaming for this source
+              stopDeepGramStream(audioSource);
+              cleanupRecording(audioSource);
 
               // Send to web clients via Socket.io
               if (global.io) {
-                global.io.emit('recording-stopped');
-              }
-
-              // Update global recording state
-              if (global.recordingState) {
-                global.recordingState.isRecording = false;
-                global.recordingState.startTime = null;
-                global.recordingState.source = null;
+                global.io.emit('recording-stopped', { source: audioSource });
               }
 
               return;
@@ -271,6 +268,7 @@ const initStreaming = (audioSource = 'system') => {
                 hasResolved = true;
                 const permissionType = response.source === 'microphone' ? 'microphone' : 'screen recording';
                 const errorMessage = `${permissionType} permission denied. Please grant permission in System Preferences > Privacy & Security.`;
+                cleanupRecording(audioSource);
                 reject(new Error(errorMessage));
               }
               return;
@@ -290,134 +288,158 @@ const initStreaming = (audioSource = 'system') => {
             if (errorCodes[response.code] && !hasResolved) {
               clearTimeout(timeout);
               hasResolved = true;
+              cleanupRecording(audioSource);
               reject(new Error(errorCodes[response.code]));
               return;
             }
 
           } catch (parseError) {
             // Not JSON, probably debug output - ignore
-            console.log('Swift recorder debug:', line);
+            console.log(`Swift ${audioSource} recorder debug:`, line);
           }
         }
       } catch (error) {
-        console.error('Error processing Swift recorder stderr:', error);
+        console.error(`Error processing Swift ${audioSource} recorder stderr:`, error);
       }
     });
 
     // Handle binary audio data from stdout
-    recordingProcess.stdout.on("data", (data) => {
-      if (!deepgramConnection) {
-        console.log('Received audio data but DeepGram not connected yet, buffering...');
+    state.process.stdout.on("data", (data) => {
+      if (!state.deepgramConnection) {
+        console.log(`Received ${audioSource} audio data but DeepGram not connected yet, buffering...`);
         return;
       }
 
       // Parse the audio packets with source identification
-      const audioChunks = audioStreamParser.processData(data);
+      const audioChunks = state.audioStreamParser.processData(data);
       
       // Forward each audio chunk to DeepGram
       for (const audioChunk of audioChunks) {
         try {
           console.log(`Processing audio chunk from ${audioChunk.source} (${audioChunk.data.length} bytes)`);
-          deepgramConnection.send(audioChunk.data);
+          state.deepgramConnection.send(audioChunk.data);
         } catch (error) {
           console.error(`Error sending ${audioChunk.source} audio to DeepGram:`, error);
         }
       }
     });
 
-    recordingProcess.on("error", (error) => {
+    state.process.on("error", (error) => {
       if (!hasResolved) {
         clearTimeout(timeout);
         hasResolved = true;
-        console.error('Recording process error:', error);
-        reject(new Error(`Failed to start recording process: ${error.message}`));
+        console.error(`${audioSource} recording process error:`, error);
+        cleanupRecording(audioSource);
+        reject(new Error(`Failed to start ${audioSource} recording process: ${error.message}`));
       }
     });
 
-    recordingProcess.on("exit", (code, signal) => {
-      console.log('Recording process exited with code:', code, 'signal:', signal);
+    state.process.on("exit", (code, signal) => {
+      console.log(`${audioSource} recording process exited with code:`, code, 'signal:', signal);
       
-      // Clean up DeepGram connection
-      stopDeepGramStream();
+      // Clean up this source
+      stopDeepGramStream(audioSource);
+      cleanupRecording(audioSource);
       
       if (!hasResolved) {
         clearTimeout(timeout);
         hasResolved = true;
         
         if (code === 0) {
-          reject(new Error('Recording process completed without starting recording. This may indicate a permissions or system audio issue.'));
+          reject(new Error(`${audioSource} recording process completed without starting recording. This may indicate a permissions issue.`));
         } else {
-          reject(new Error(`Recording process exited with error code ${code}`));
+          reject(new Error(`${audioSource} recording process exited with error code ${code}`));
         }
       }
     });
   });
 };
 
+// Helper function to clean up recording state
+function cleanupRecording(audioSource) {
+  const state = recordingStates[audioSource];
+  
+  if (state.process) {
+    state.process.kill("SIGINT");
+    state.process = null;
+  }
+  
+  state.audioFormat = null;
+  state.audioStreamParser = null;
+  state.isActive = false;
+}
+
 // Enhanced startRecording function with audio source parameter
 module.exports.startRecording = async (audioSource = 'system') => {
   console.log(`Starting ${audioSource} streaming recording...`);
 
-  const isPermissionGranted = await checkPermissions();
+  // For microphone, we might want to skip the screen recording permission check
+  if (audioSource === 'system') {
+    const isPermissionGranted = await checkPermissions();
 
-  if (!isPermissionGranted) {
-    const errorMsg = 'Screen recording permission not granted. Please enable it in System Preferences > Privacy & Security > Screen Recording.';
-    console.error(errorMsg);
-    
-    // If we have a main window, show the permission denied screen
-    if (global.mainWindow) {
-      global.mainWindow.loadFile("./src/electron/screens/permission-denied/screen.html");
-    }
-    
-    // Also emit to web clients
-    if (global.io) {
-      global.io.emit('permission-denied');
-    }
+    if (!isPermissionGranted) {
+      const errorMsg = 'Screen recording permission not granted. Please enable it in System Preferences > Privacy & Security > Screen Recording.';
+      console.error(errorMsg);
+      
+      // If we have a main window, show the permission denied screen
+      if (global.mainWindow) {
+        global.mainWindow.loadFile("./src/electron/screens/permission-denied/screen.html");
+      }
+      
+      // Also emit to web clients
+      if (global.io) {
+        global.io.emit('permission-denied');
+      }
 
-    throw new Error(errorMsg);
+      throw new Error(errorMsg);
+    }
   }
 
   // Try to start streaming
   try {
     const result = await initStreaming(audioSource);
-    console.log('Streaming started successfully:', result);
+    console.log(`${audioSource} streaming started successfully:`, result);
     return result;
   } catch (error) {
-    console.error('Failed to start streaming:', error.message);
+    console.error(`Failed to start ${audioSource} streaming:`, error.message);
     
-    // Clean up any leftover process
-    if (recordingProcess) {
-      recordingProcess.kill('SIGKILL');
-      recordingProcess = null;
-    }
-
-    // Clean up DeepGram
-    stopDeepGramStream();
-
-    // Update recording state
-    if (global.recordingState) {
-      global.recordingState.isRecording = false;
-      global.recordingState.startTime = null;
-      global.recordingState.source = null;
-    }
+    // Clean up this specific source
+    cleanupRecording(audioSource);
+    stopDeepGramStream(audioSource);
 
     // Emit error to web clients
     if (global.io) {
-      global.io.emit('recording-error', { message: error.message });
+      global.io.emit('recording-error', { message: error.message, source: audioSource });
     }
 
     throw error;
   }
 };
 
-module.exports.stopRecording = () => {
-  console.log('Stopping streaming recording');
-  
-  if (recordingProcess !== null) {
-    recordingProcess.kill("SIGINT");
-    recordingProcess = null;
+// Enhanced stopRecording function with audio source parameter
+module.exports.stopRecording = (audioSource = null) => {
+  if (audioSource) {
+    console.log(`Stopping ${audioSource} streaming recording`);
+    stopDeepGramStream(audioSource);
+    cleanupRecording(audioSource);
+  } else {
+    console.log('Stopping all streaming recordings');
+    // Stop all active recordings
+    Object.keys(recordingStates).forEach(source => {
+      if (recordingStates[source].isActive) {
+        stopDeepGramStream(source);
+        cleanupRecording(source);
+      }
+    });
   }
-  
-  // Also stop DeepGram connection
-  stopDeepGramStream();
+};
+
+// New function to check if a source is active
+module.exports.isRecordingActive = (audioSource) => {
+  return recordingStates[audioSource].isActive;
+};
+
+// New function to get active sources
+module.exports.getActiveSources = () => {
+  return Object.keys(recordingStates).filter(source => recordingStates[source].isActive);
 };
