@@ -6,6 +6,7 @@ let recordingProcess = null;
 let deepgramClient = null;
 let deepgramConnection = null;
 let audioFormat = null;
+let currentAudioSource = 'system'; // Track which source is currently active
 
 // Initialize DeepGram client
 function initializeDeepGram() {
@@ -18,10 +19,13 @@ function initializeDeepGram() {
 }
 
 // Start DeepGram streaming connection
-function startDeepGramStream() {
+function startDeepGramStream(audioSource = 'system') {
   if (!deepgramClient) {
     initializeDeepGram();
   }
+
+  // Store the audio source for transcription routing
+  currentAudioSource = audioSource;
 
   // DeepGram streaming configuration
   const deepgramConfig = {
@@ -36,12 +40,12 @@ function startDeepGramStream() {
     channels: 1
   };
 
-  console.log('Starting DeepGram streaming connection...');
+  console.log(`Starting DeepGram streaming connection for ${audioSource}...`);
   deepgramConnection = deepgramClient.listen.live(deepgramConfig);
 
   // Handle DeepGram responses
   deepgramConnection.on('open', () => {
-    console.log('DeepGram connection opened');
+    console.log(`DeepGram connection opened for ${audioSource}`);
   });
 
   deepgramConnection.on('Results', (data) => {
@@ -51,12 +55,13 @@ function startDeepGramStream() {
         text: result.transcript,
         is_final: data.is_final,
         confidence: result.confidence,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        source: currentAudioSource // Include source information
       };
 
-      console.log(`DeepGram ${data.is_final ? 'FINAL' : 'interim'}:`, result.transcript);
+      console.log(`DeepGram ${currentAudioSource} ${data.is_final ? 'FINAL' : 'interim'}:`, result.transcript);
 
-      // Send transcription to clients via Socket.io
+      // Send transcription to clients via Socket.io with source information
       if (global.io) {
         global.io.emit('transcription-chunk', transcriptionData);
       }
@@ -64,20 +69,20 @@ function startDeepGramStream() {
   });
 
   deepgramConnection.on('Metadata', (data) => {
-    console.log('DeepGram metadata:', data);
+    console.log(`DeepGram ${currentAudioSource} metadata:`, data);
   });
 
   deepgramConnection.on('Error', (error) => {
-    console.error('DeepGram error:', error);
+    console.error(`DeepGram ${currentAudioSource} error:`, error);
     
     // Emit error to web clients
     if (global.io) {
-      global.io.emit('transcription-error', { message: error.message });
+      global.io.emit('transcription-error', { message: error.message, source: currentAudioSource });
     }
   });
 
   deepgramConnection.on('Close', () => {
-    console.log('DeepGram connection closed');
+    console.log(`DeepGram ${currentAudioSource} connection closed`);
   });
 
   return deepgramConnection;
@@ -86,13 +91,14 @@ function startDeepGramStream() {
 // Stop DeepGram streaming
 function stopDeepGramStream() {
   if (deepgramConnection) {
-    console.log('Closing DeepGram connection...');
+    console.log(`Closing DeepGram connection for ${currentAudioSource}...`);
     deepgramConnection.finish();
     deepgramConnection = null;
   }
+  currentAudioSource = 'system'; // Reset to default
 }
 
-// Parse binary audio stream from Swift
+// Parse binary audio stream from Swift with source identification
 class AudioStreamParser {
   constructor() {
     this.buffer = Buffer.alloc(0);
@@ -113,11 +119,22 @@ class AudioStreamParser {
         this.buffer = this.buffer.subarray(4);
       }
 
-      // Check if we have a complete audio packet
+      // Check if we have a complete packet (including source identifier)
       if (this.buffer.length >= this.expectedLength) {
-        // Extract the audio data
-        const audioData = this.buffer.subarray(0, this.expectedLength);
-        audioChunks.push(audioData);
+        // Extract the source identifier (first byte)
+        const sourceId = this.buffer.readUInt8(0);
+        
+        // Extract the audio data (remaining bytes)
+        const audioData = this.buffer.subarray(1, this.expectedLength);
+        
+        // Determine source type
+        const source = sourceId === 0x01 ? 'system' : 'microphone';
+        
+        audioChunks.push({
+          source: source,
+          data: audioData,
+          sourceId: sourceId
+        });
 
         // Remove processed data from buffer
         this.buffer = this.buffer.subarray(this.expectedLength);
@@ -132,12 +149,18 @@ class AudioStreamParser {
   }
 }
 
-const initStreaming = () => {
+const initStreaming = (audioSource = 'system') => {
   return new Promise((resolve, reject) => {
-    console.log('Starting audio streaming process...');
+    console.log(`Starting ${audioSource} audio streaming process...`);
     
-    // Start Swift recorder in streaming mode
-    recordingProcess = spawn("./src/swift/Recorder", ["--stream"]);
+    // Build command arguments based on audio source
+    const args = ['--stream'];
+    if (audioSource === 'microphone') {
+      args.push('--microphone');
+    }
+    
+    // Start Swift recorder with appropriate arguments
+    recordingProcess = spawn("./src/swift/Recorder", args);
     
     let hasResolved = false;
     let audioStreamParser = new AudioStreamParser();
@@ -176,10 +199,11 @@ const initStreaming = () => {
                 
                 audioFormat = response.audio_format;
                 const timestamp = new Date(response.timestamp).getTime();
+                const source = response.source || 'system'; // Fallback for backward compatibility
 
-                // Start DeepGram streaming
+                // Start DeepGram streaming with the correct source
                 try {
-                  startDeepGramStream();
+                  startDeepGramStream(source);
                 } catch (error) {
                   console.error('Failed to start DeepGram:', error);
                   reject(error);
@@ -196,7 +220,8 @@ const initStreaming = () => {
                   global.io.emit('recording-started', {
                     startTime: timestamp,
                     streaming: true,
-                    audioFormat: audioFormat
+                    audioFormat: audioFormat,
+                    source: source
                   });
                 }
 
@@ -205,9 +230,10 @@ const initStreaming = () => {
                   global.recordingState.isRecording = true;
                   global.recordingState.startTime = timestamp;
                   global.recordingState.outputPath = 'streaming';
+                  global.recordingState.source = source;
                 }
 
-                resolve({ success: true, streaming: true, timestamp, audioFormat });
+                resolve({ success: true, streaming: true, timestamp, audioFormat, source });
               }
               return;
             }
@@ -232,6 +258,7 @@ const initStreaming = () => {
               if (global.recordingState) {
                 global.recordingState.isRecording = false;
                 global.recordingState.startTime = null;
+                global.recordingState.source = null;
               }
 
               return;
@@ -242,7 +269,9 @@ const initStreaming = () => {
               if (!hasResolved) {
                 clearTimeout(timeout);
                 hasResolved = true;
-                reject(new Error('Screen recording permission denied. Please grant permission in System Preferences > Privacy & Security > Screen Recording.'));
+                const permissionType = response.source === 'microphone' ? 'microphone' : 'screen recording';
+                const errorMessage = `${permissionType} permission denied. Please grant permission in System Preferences > Privacy & Security.`;
+                reject(new Error(errorMessage));
               }
               return;
             }
@@ -253,7 +282,9 @@ const initStreaming = () => {
               "CAPTURE_FAILED": response.error ? `Failed to start screen capture: ${response.error}` : 'Failed to start screen capture',
               "CONTENT_FETCH_FAILED": response.error ? `Failed to fetch screen content: ${response.error}` : 'Failed to fetch screen content',
               "STREAM_ERROR": response.error ? `Stream error: ${response.error}` : 'Recording stream encountered an error',
-              "INVALID_ARGUMENTS": 'Invalid arguments provided to recorder'
+              "INVALID_ARGUMENTS": 'Invalid arguments provided to recorder',
+              "MICROPHONE_SETUP_FAILED": response.error ? `Microphone setup failed: ${response.error}` : 'Failed to setup microphone recording',
+              "MICROPHONE_START_FAILED": response.error ? `Microphone start failed: ${response.error}` : 'Failed to start microphone recording'
             };
 
             if (errorCodes[response.code] && !hasResolved) {
@@ -280,15 +311,16 @@ const initStreaming = () => {
         return;
       }
 
-      // Parse the length-prefixed audio packets
+      // Parse the audio packets with source identification
       const audioChunks = audioStreamParser.processData(data);
       
       // Forward each audio chunk to DeepGram
       for (const audioChunk of audioChunks) {
         try {
-          deepgramConnection.send(audioChunk);
+          console.log(`Processing audio chunk from ${audioChunk.source} (${audioChunk.data.length} bytes)`);
+          deepgramConnection.send(audioChunk.data);
         } catch (error) {
-          console.error('Error sending audio to DeepGram:', error);
+          console.error(`Error sending ${audioChunk.source} audio to DeepGram:`, error);
         }
       }
     });
@@ -322,8 +354,9 @@ const initStreaming = () => {
   });
 };
 
-module.exports.startRecording = async () => {
-  console.log('Starting streaming recording...');
+// Enhanced startRecording function with audio source parameter
+module.exports.startRecording = async (audioSource = 'system') => {
+  console.log(`Starting ${audioSource} streaming recording...`);
 
   const isPermissionGranted = await checkPermissions();
 
@@ -346,7 +379,7 @@ module.exports.startRecording = async () => {
 
   // Try to start streaming
   try {
-    const result = await initStreaming();
+    const result = await initStreaming(audioSource);
     console.log('Streaming started successfully:', result);
     return result;
   } catch (error) {
@@ -365,6 +398,7 @@ module.exports.startRecording = async () => {
     if (global.recordingState) {
       global.recordingState.isRecording = false;
       global.recordingState.startTime = null;
+      global.recordingState.source = null;
     }
 
     // Emit error to web clients

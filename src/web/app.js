@@ -1,12 +1,27 @@
-class AudioRecorderApp {
+class DualAudioRecorderApp {
     constructor() {
         this.socket = io();
-        this.isRecording = false;
-        this.startTime = null;
-        this.timerInterval = null;
+        
+        // State for each audio source
+        this.state = {
+            system: {
+                isRecording: false,
+                startTime: null,
+                timerInterval: null,
+                finalTranscription: '',
+                interimTranscription: ''
+            },
+            microphone: {
+                isRecording: false,
+                startTime: null,
+                timerInterval: null,
+                finalTranscription: '',
+                interimTranscription: ''
+            }
+        };
+        
+        this.currentTab = 'system';
         this.isElectron = this.detectElectron();
-        this.interimTranscription = '';
-        this.finalTranscription = '';
         
         this.initializeElements();
         this.setupEventListeners();
@@ -16,32 +31,77 @@ class AudioRecorderApp {
     }
 
     detectElectron() {
-        // Check if we're running inside Electron
         return typeof window !== 'undefined' && window.process && window.process.type;
     }
 
     initializeElements() {
-        // Remove folder/filename elements - no longer needed for streaming
-        this.startBtn = document.getElementById('start-btn');
-        this.stopBtn = document.getElementById('stop-btn');
-        this.recordingStatus = document.getElementById('recording-status');
-        this.elapsedTime = document.getElementById('elapsed-time');
-        this.outputPath = document.getElementById('output-path');
+        // Tab elements
+        this.tabButtons = {
+            system: document.getElementById('tab-system'),
+            microphone: document.getElementById('tab-microphone'),
+            combined: document.getElementById('tab-combined')
+        };
+
+        // Panel elements
+        this.panels = {
+            system: document.getElementById('panel-system'),
+            microphone: document.getElementById('panel-microphone'),
+            combined: document.getElementById('panel-combined')
+        };
+
+        // System audio elements
+        this.systemElements = {
+            startBtn: document.getElementById('system-start-btn'),
+            stopBtn: document.getElementById('system-stop-btn'),
+            recordingStatus: document.getElementById('system-recording-status'),
+            elapsedTime: document.getElementById('system-elapsed-time'),
+            outputPath: document.getElementById('system-output-path'),
+            transcriptionSection: document.getElementById('system-transcription-section'),
+            transcriptionText: document.getElementById('system-transcription-text'),
+            transcriptionStatus: document.getElementById('system-transcription-status'),
+            audioFormat: document.getElementById('system-audio-format')
+        };
+
+        // Microphone elements
+        this.microphoneElements = {
+            startBtn: document.getElementById('microphone-start-btn'),
+            stopBtn: document.getElementById('microphone-stop-btn'),
+            recordingStatus: document.getElementById('microphone-recording-status'),
+            elapsedTime: document.getElementById('microphone-elapsed-time'),
+            outputPath: document.getElementById('microphone-output-path'),
+            transcriptionSection: document.getElementById('microphone-transcription-section'),
+            transcriptionText: document.getElementById('microphone-transcription-text'),
+            transcriptionStatus: document.getElementById('microphone-transcription-status'),
+            audioFormat: document.getElementById('microphone-audio-format')
+        };
+
+        // Combined elements
+        this.combinedElements = {
+            startBothBtn: document.getElementById('start-both-btn'),
+            stopAllBtn: document.getElementById('stop-all-btn'),
+            transcriptionText: document.getElementById('combined-transcription-text'),
+            systemStatus: document.getElementById('combined-system-status'),
+            microphoneStatus: document.getElementById('combined-microphone-status')
+        };
+
+        // Permission elements
         this.permissionStatus = document.getElementById('permission-status');
         this.permissionGranted = document.getElementById('permission-granted');
         this.permissionDenied = document.getElementById('permission-denied');
-        this.transcriptionSection = document.getElementById('transcription-section');
-        this.transcriptionText = document.getElementById('transcription-text');
-        this.transcriptionStatus = document.getElementById('transcription-status');
-        
-        // Add new elements for streaming info
-        this.streamingStatus = document.getElementById('streaming-status');
-        this.audioFormat = document.getElementById('audio-format');
     }
 
     setupEventListeners() {
-        this.startBtn.addEventListener('click', () => this.startRecording());
-        this.stopBtn.addEventListener('click', () => this.stopRecording());
+        // System audio controls
+        this.systemElements.startBtn.addEventListener('click', () => this.startRecording('system'));
+        this.systemElements.stopBtn.addEventListener('click', () => this.stopRecording('system'));
+
+        // Microphone controls
+        this.microphoneElements.startBtn.addEventListener('click', () => this.startRecording('microphone'));
+        this.microphoneElements.stopBtn.addEventListener('click', () => this.stopRecording('microphone'));
+
+        // Combined controls
+        this.combinedElements.startBothBtn.addEventListener('click', () => this.startBoth());
+        this.combinedElements.stopAllBtn.addEventListener('click', () => this.stopAll());
     }
 
     setupSocketListeners() {
@@ -50,49 +110,39 @@ class AudioRecorderApp {
         });
 
         this.socket.on('recording-started', (data) => {
-            this.isRecording = true;
-            this.startTime = data.startTime;
-            this.updateRecordingUI();
-            this.startTimer();
-            
-            // Show streaming info
-            if (data.streaming) {
-                this.outputPath.textContent = 'Streaming to DeepGram';
-                if (data.audioFormat) {
-                    const format = data.audioFormat;
-                    this.audioFormat.textContent = `${format.sample_rate}Hz, ${format.channels}ch`;
-                }
-            }
+            const source = data.source || 'system';
+            this.handleRecordingStarted(source, data);
         });
 
-        this.socket.on('recording-stopped', () => {
-            this.isRecording = false;
-            this.startTime = null;
-            this.updateRecordingUI();
-            this.stopTimer();
+        this.socket.on('recording-stopped', (data) => {
+            const source = data.source || 'system';
+            this.handleRecordingStopped(source);
         });
 
         this.socket.on('permission-denied', () => {
-            this.permissionStatus.classList.remove('hidden');
-            this.permissionGranted.classList.add('hidden');
-            this.permissionDenied.classList.remove('hidden');
-            this.startBtn.disabled = true;
+            this.showPermissionError();
         });
 
         this.socket.on('recording-error', (data) => {
-            alert('Recording Error: ' + data.message);
-            this.isRecording = false;
-            this.updateRecordingUI();
+            const source = data.source || 'unknown';
+            this.handleRecordingError(source, data.message);
         });
 
-        // Handle real-time transcription from DeepGram
         this.socket.on('transcription-chunk', (data) => {
-            this.handleTranscriptionChunk(data);
+            // Now handle transcription based on the source information
+            const source = data.source || 'system';
+            this.handleTranscriptionChunk(source, data);
         });
 
         this.socket.on('transcription-error', (data) => {
-            console.error('Transcription error:', data.message);
-            this.transcriptionStatus.textContent = 'Transcription error: ' + data.message;
+            const source = data.source || 'system';
+            console.error(`Transcription error for ${source}:`, data.message);
+            
+            // Update the appropriate transcription status
+            const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
+            if (elements.transcriptionStatus) {
+                elements.transcriptionStatus.textContent = `Transcription error: ${data.message}`;
+            }
         });
     }
 
@@ -108,7 +158,7 @@ class AudioRecorderApp {
 
     async checkPermissions() {
         try {
-            const response = await fetch('/api/permissions');
+            const response = await fetch('/api/permissions/system');
             const data = await response.json();
             
             this.permissionStatus.classList.remove('hidden');
@@ -117,21 +167,31 @@ class AudioRecorderApp {
                 this.permissionGranted.classList.remove('hidden');
                 this.permissionDenied.classList.add('hidden');
             } else {
-                this.permissionGranted.classList.add('hidden');
-                this.permissionDenied.classList.remove('hidden');
-                this.startBtn.disabled = true;
+                this.showPermissionError();
             }
         } catch (error) {
             console.error('Error checking permissions:', error);
         }
     }
 
-    async startRecording() {
-        try {
-            this.startBtn.disabled = true;
-            this.startBtn.textContent = 'Starting...';
+    showPermissionError() {
+        this.permissionStatus.classList.remove('hidden');
+        this.permissionGranted.classList.add('hidden');
+        this.permissionDenied.classList.remove('hidden');
+        this.systemElements.startBtn.disabled = true;
+        this.microphoneElements.startBtn.disabled = true;
+        this.combinedElements.startBothBtn.disabled = true;
+    }
 
-            const response = await fetch('/api/recording/start', {
+    async startRecording(source) {
+        const endpoint = source === 'microphone' ? '/api/recording/microphone/start' : '/api/recording/start';
+        const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
+        
+        try {
+            elements.startBtn.disabled = true;
+            elements.startBtn.textContent = 'Starting...';
+
+            const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -141,133 +201,334 @@ class AudioRecorderApp {
             const data = await response.json();
 
             if (!response.ok) {
-                throw new Error(data.error || 'Failed to start recording');
+                throw new Error(data.error || `Failed to start ${source} recording`);
             }
 
-            console.log('Streaming recording started:', data);
+            console.log(`${source} recording started:`, data);
 
         } catch (error) {
-            console.error('Error starting recording:', error);
-            alert('Error starting recording: ' + error.message);
-            this.startBtn.disabled = false;
-            this.startBtn.textContent = 'Start Recording';
+            console.error(`Error starting ${source} recording:`, error);
+            alert(`Error starting ${source} recording: ` + error.message);
+            elements.startBtn.disabled = false;
+            elements.startBtn.textContent = source === 'microphone' ? '🎤 Start Microphone' : '🖥️ Start System Audio';
         }
     }
 
-    async stopRecording() {
+    async stopRecording(source) {
+        const endpoint = source === 'microphone' ? '/api/recording/microphone/stop' : '/api/recording/stop';
+        
         try {
-            const response = await fetch('/api/recording/stop', {
+            const response = await fetch(endpoint, {
                 method: 'POST',
             });
 
             if (!response.ok) {
-                throw new Error('Failed to stop recording');
+                throw new Error(`Failed to stop ${source} recording`);
             }
 
         } catch (error) {
-            console.error('Error stopping recording:', error);
-            alert('Error stopping recording: ' + error.message);
+            console.error(`Error stopping ${source} recording:`, error);
+            alert(`Error stopping ${source} recording: ` + error.message);
         }
     }
 
-    updateUI(state) {
-        this.isRecording = state.isRecording;
-        this.startTime = state.startTime;
+    async startBoth() {
+        this.combinedElements.startBothBtn.disabled = true;
+        this.combinedElements.startBothBtn.textContent = 'Starting...';
         
-        if (state.streaming) {
-            this.outputPath.textContent = 'Streaming to DeepGram';
-            if (state.audioFormat) {
-                const format = state.audioFormat;
-                this.audioFormat.textContent = `${format.sample_rate}Hz, ${format.channels}ch`;
+        try {
+            await Promise.all([
+                this.startRecording('system'),
+                this.startRecording('microphone')
+            ]);
+        } catch (error) {
+            console.error('Error starting both recordings:', error);
+        } finally {
+            this.combinedElements.startBothBtn.disabled = false;
+            this.combinedElements.startBothBtn.textContent = '🚀 Start Both';
+        }
+    }
+
+    async stopAll() {
+        try {
+            const response = await fetch('/api/recording/stop-all', {
+                method: 'POST',
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to stop all recordings');
+            }
+
+        } catch (error) {
+            console.error('Error stopping all recordings:', error);
+            alert('Error stopping all recordings: ' + error.message);
+        }
+    }
+
+    handleRecordingStarted(source, data) {
+        this.state[source].isRecording = true;
+        this.state[source].startTime = data.startTime;
+        
+        const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
+        
+        elements.startBtn.disabled = true;
+        elements.stopBtn.disabled = false;
+        elements.recordingStatus.classList.remove('hidden');
+        elements.transcriptionSection.classList.remove('hidden');
+        elements.startBtn.textContent = 'Recording...';
+        
+        if (data.streaming) {
+            elements.outputPath.textContent = 'Streaming to DeepGram';
+            if (data.audioFormat) {
+                const format = data.audioFormat;
+                elements.audioFormat.textContent = `${format.sample_rate}Hz, ${format.channels}ch`;
             }
         }
         
-        this.updateRecordingUI();
+        // Clear previous transcription
+        this.state[source].finalTranscription = '';
+        this.state[source].interimTranscription = '';
+        elements.transcriptionText.textContent = '';
+        elements.transcriptionStatus.textContent = 'Listening for speech...';
         
-        if (this.isRecording && this.startTime) {
-            this.startTimer();
-        }
+        this.startTimer(source);
+        this.updateCombinedStatus();
     }
 
-    updateRecordingUI() {
-        if (this.isRecording) {
-            this.startBtn.disabled = true;
-            this.stopBtn.disabled = false;
-            this.recordingStatus.classList.remove('hidden');
-            this.transcriptionSection.classList.remove('hidden');
-            this.transcriptionStatus.classList.remove('hidden');
-            this.startBtn.textContent = 'Recording...';
-            
-            // Clear previous transcription
-            this.finalTranscription = '';
-            this.interimTranscription = '';
-            this.transcriptionText.textContent = '';
-            this.transcriptionStatus.textContent = 'Listening for speech...';
-            
+    handleRecordingStopped(source) {
+        this.state[source].isRecording = false;
+        this.state[source].startTime = null;
+        
+        const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
+        
+        elements.startBtn.disabled = false;
+        elements.stopBtn.disabled = true;
+        elements.recordingStatus.classList.add('hidden');
+        elements.startBtn.textContent = source === 'microphone' ? '🎤 Start Microphone' : '🖥️ Start System Audio';
+        elements.transcriptionStatus.textContent = 'Recording stopped';
+        
+        this.stopTimer(source);
+        this.updateCombinedStatus();
+    }
+
+    handleRecordingError(source, message) {
+        alert(`${source} Recording Error: ` + message);
+        this.state[source].isRecording = false;
+        this.updateRecordingUI(source);
+    }
+
+    updateUI(state) {
+        // Handle legacy state structure and new dual-source structure
+        if (state.system && state.microphone) {
+            // New dual-source state
+            this.updateSourceState('system', state.system);
+            this.updateSourceState('microphone', state.microphone);
         } else {
-            this.startBtn.disabled = false;
-            this.stopBtn.disabled = true;
-            this.recordingStatus.classList.add('hidden');
-            this.startBtn.textContent = 'Start Recording';
-            this.transcriptionStatus.textContent = 'Recording stopped';
+            // Legacy single-source state - assume it's system audio
+            this.updateSourceState('system', state);
+        }
+        
+        this.updateCombinedStatus();
+    }
+
+    updateSourceState(source, sourceState) {
+        this.state[source].isRecording = sourceState.isRecording;
+        this.state[source].startTime = sourceState.startTime;
+        
+        const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
+        
+        if (sourceState.streaming) {
+            elements.outputPath.textContent = 'Streaming to DeepGram';
+            if (sourceState.audioFormat) {
+                const format = sourceState.audioFormat;
+                elements.audioFormat.textContent = `${format.sample_rate}Hz, ${format.channels}ch`;
+            }
+        }
+        
+        this.updateRecordingUI(source);
+        
+        if (this.state[source].isRecording && this.state[source].startTime) {
+            this.startTimer(source);
         }
     }
 
-    startTimer() {
-        this.stopTimer(); // Clear any existing timer
+    updateRecordingUI(source) {
+        const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
+        const sourceState = this.state[source];
         
-        this.timerInterval = setInterval(() => {
-            if (this.startTime) {
-                const elapsed = Math.floor((Date.now() - this.startTime) / 1000);
+        if (sourceState.isRecording) {
+            elements.startBtn.disabled = true;
+            elements.stopBtn.disabled = false;
+            elements.recordingStatus.classList.remove('hidden');
+            elements.transcriptionSection.classList.remove('hidden');
+            elements.startBtn.textContent = 'Recording...';
+        } else {
+            elements.startBtn.disabled = false;
+            elements.stopBtn.disabled = true;
+            elements.recordingStatus.classList.add('hidden');
+            elements.startBtn.textContent = source === 'microphone' ? '🎤 Start Microphone' : '🖥️ Start System Audio';
+        }
+    }
+
+    updateCombinedStatus() {
+        const systemStatus = this.state.system.isRecording ? 'Recording' : 'Stopped';
+        const microphoneStatus = this.state.microphone.isRecording ? 'Recording' : 'Stopped';
+        
+        this.combinedElements.systemStatus.textContent = systemStatus;
+        this.combinedElements.microphoneStatus.textContent = microphoneStatus;
+        
+        // Update status colors
+        this.combinedElements.systemStatus.className = this.state.system.isRecording ? 'ml-2 font-medium text-green-600' : 'ml-2 font-medium text-gray-500';
+        this.combinedElements.microphoneStatus.className = this.state.microphone.isRecording ? 'ml-2 font-medium text-green-600' : 'ml-2 font-medium text-gray-500';
+    }
+
+    startTimer(source) {
+        this.stopTimer(source);
+        
+        const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
+        
+        this.state[source].timerInterval = setInterval(() => {
+            if (this.state[source].startTime) {
+                const elapsed = Math.floor((Date.now() - this.state[source].startTime) / 1000);
                 const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
                 const seconds = (elapsed % 60).toString().padStart(2, '0');
-                this.elapsedTime.textContent = `${minutes}:${seconds}`;
+                elements.elapsedTime.textContent = `${minutes}:${seconds}`;
             }
         }, 1000);
     }
 
-    stopTimer() {
-        if (this.timerInterval) {
-            clearInterval(this.timerInterval);
-            this.timerInterval = null;
+    stopTimer(source) {
+        if (this.state[source].timerInterval) {
+            clearInterval(this.state[source].timerInterval);
+            this.state[source].timerInterval = null;
         }
-        this.elapsedTime.textContent = '00:00';
+        
+        const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
+        elements.elapsedTime.textContent = '00:00';
     }
 
-    handleTranscriptionChunk(data) {
-        // Show transcription section if hidden
-        this.transcriptionSection.classList.remove('hidden');
-        this.transcriptionStatus.classList.remove('hidden');
+    handleTranscriptionChunk(source, data) {
+        const elements = source === 'microphone' ? this.microphoneElements : this.systemElements;
+        const sourceState = this.state[source];
+        
+        elements.transcriptionSection.classList.remove('hidden');
         
         if (data.is_final) {
-            // Final result - add to permanent transcription
-            this.finalTranscription += data.text + ' ';
-            this.interimTranscription = ''; // Clear interim
-            this.transcriptionStatus.textContent = 'Listening for speech...';
+            sourceState.finalTranscription += data.text + ' ';
+            sourceState.interimTranscription = '';
+            elements.transcriptionStatus.textContent = 'Listening for speech...';
         } else {
-            // Interim result - update temporary text
-            this.interimTranscription = data.text;
-            this.transcriptionStatus.textContent = 'Processing speech...';
+            sourceState.interimTranscription = data.text;
+            elements.transcriptionStatus.textContent = 'Processing speech...';
         }
         
-        // Display combined final + interim text
-        const displayText = this.finalTranscription + this.interimTranscription;
-        this.transcriptionText.textContent = displayText;
+        const displayText = sourceState.finalTranscription + sourceState.interimTranscription;
+        elements.transcriptionText.textContent = displayText;
         
-        // Auto-scroll to bottom
-        const transcriptionDisplay = document.getElementById('transcription-display');
+        // Update combined view
+        this.updateCombinedTranscription();
+        
+        // Auto-scroll
+        const transcriptionDisplay = document.getElementById(`${source}-transcription-display`);
         if (transcriptionDisplay) {
             transcriptionDisplay.scrollTop = transcriptionDisplay.scrollHeight;
         }
         
-        // Log confidence if available
         if (data.confidence && data.is_final) {
-            console.log(`Transcription confidence: ${(data.confidence * 100).toFixed(1)}%`);
+            console.log(`${source} transcription confidence: ${(data.confidence * 100).toFixed(1)}%`);
+        }
+    }
+
+    updateCombinedTranscription() {
+        const systemText = (this.state.system.finalTranscription + this.state.system.interimTranscription).trim();
+        const microphoneText = (this.state.microphone.finalTranscription + this.state.microphone.interimTranscription).trim();
+        
+        let combinedText = '';
+        
+        if (systemText && microphoneText) {
+            combinedText = `🖥️ System: ${systemText}\n\n🎤 Microphone: ${microphoneText}`;
+        } else if (systemText) {
+            combinedText = `🖥️ System: ${systemText}`;
+        } else if (microphoneText) {
+            combinedText = `🎤 Microphone: ${microphoneText}`;
+        } else {
+            combinedText = 'Combined transcription will appear here when either source is active...';
+        }
+        
+        this.combinedElements.transcriptionText.textContent = combinedText;
+        
+        // Auto-scroll combined view
+        const combinedDisplay = document.getElementById('combined-transcription-display');
+        if (combinedDisplay) {
+            combinedDisplay.scrollTop = combinedDisplay.scrollHeight;
         }
     }
 }
 
+// Global functions for tab switching and utility actions
+function switchTab(tabName) {
+    const app = window.audioApp;
+    if (!app) return;
+    
+    app.currentTab = tabName;
+    
+    // Update tab buttons
+    Object.keys(app.tabButtons).forEach(key => {
+        const button = app.tabButtons[key];
+        if (key === tabName) {
+            button.className = 'tab-button py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap border-blue-500 text-blue-600';
+        } else {
+            button.className = 'tab-button py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700';
+        }
+    });
+    
+    // Update panel visibility
+    Object.keys(app.panels).forEach(key => {
+        const panel = app.panels[key];
+        if (key === tabName) {
+            panel.classList.remove('hidden');
+        } else {
+            panel.classList.add('hidden');
+        }
+    });
+}
+
+function clearTranscription(source) {
+    const app = window.audioApp;
+    if (!app) return;
+    
+    if (source === 'combined') {
+        app.combinedElements.transcriptionText.textContent = 'Combined transcription will appear here when either source is active...';
+        app.combinedElements.transcriptionText.className += ' text-gray-400 italic';
+    } else {
+        const elements = source === 'microphone' ? app.microphoneElements : app.systemElements;
+        app.state[source].finalTranscription = '';
+        app.state[source].interimTranscription = '';
+        elements.transcriptionText.textContent = `${source === 'microphone' ? 'Microphone' : 'System audio'} transcription will appear here...`;
+        elements.transcriptionText.className += ' text-gray-400 italic';
+        app.updateCombinedTranscription();
+    }
+}
+
+function copyTranscription(source) {
+    const app = window.audioApp;
+    if (!app) return;
+    
+    let text = '';
+    if (source === 'combined') {
+        text = app.combinedElements.transcriptionText.textContent;
+    } else {
+        const elements = source === 'microphone' ? app.microphoneElements : app.systemElements;
+        text = elements.transcriptionText.textContent;
+    }
+    
+    navigator.clipboard.writeText(text).then(() => {
+        // Could add a toast notification here
+        console.log(`${source} transcription copied to clipboard`);
+    });
+}
+
 // Initialize the app when the page loads
 document.addEventListener('DOMContentLoaded', () => {
-    new AudioRecorderApp();
+    window.audioApp = new DualAudioRecorderApp();
 });

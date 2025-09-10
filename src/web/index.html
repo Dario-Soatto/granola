@@ -3,18 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>System Audio Recorder - DeepGram Streaming</title>
+    <title>Dual Audio Recorder - DeepGram Streaming</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="/socket.io/socket.io.js"></script>
 </head>
 <body class="bg-gray-100 min-h-screen">
     <div class="container mx-auto px-4 py-8">
-        <div class="max-w-2xl mx-auto bg-white rounded-lg shadow-md p-6">
-            <h1 class="text-3xl font-bold text-center mb-8 text-gray-800">
-                System Audio Recorder
+        <div class="max-w-4xl mx-auto bg-white rounded-lg shadow-md p-6">
+            <h1 class="text-3xl font-bold text-center mb-4 text-gray-800">
+                Dual Audio Recorder
             </h1>
             <p class="text-center text-gray-600 mb-8">
-                Real-time audio transcription with DeepGram
+                Real-time transcription of system audio and microphone with DeepGram
             </p>
             
             <!-- Permission Status -->
@@ -23,106 +23,290 @@
                     ✅ Recording permissions granted
                 </div>
                 <div id="permission-denied" class="bg-red-100 text-red-800 hidden">
-                    ❌ Recording permissions required. Please grant screen recording permissions in System Preferences.
+                    ❌ Recording permissions required. Please grant recording permissions in System Preferences.
                 </div>
             </div>
 
-            <!-- Streaming Info -->
-            <div class="mb-6 p-4 bg-blue-50 rounded-lg">
-                <h3 class="text-sm font-medium text-blue-900 mb-2">Streaming Configuration</h3>
-                <div class="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                        <span class="text-gray-600">Service:</span>
-                        <span class="font-mono ml-2">DeepGram Nova-2</span>
+            <!-- Audio Source Tabs -->
+            <div class="mb-6">
+                <div class="border-b border-gray-200">
+                    <nav class="-mb-px flex space-x-8">
+                        <button 
+                            id="tab-system" 
+                            class="tab-button py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap border-blue-500 text-blue-600"
+                            onclick="switchTab('system')"
+                        >
+                            🖥️ System Audio
+                        </button>
+                        <button 
+                            id="tab-microphone" 
+                            class="tab-button py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700"
+                            onclick="switchTab('microphone')"
+                        >
+                            🎤 Microphone
+                        </button>
+                        <button 
+                            id="tab-combined" 
+                            class="tab-button py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap border-transparent text-gray-500 hover:text-gray-700"
+                            onclick="switchTab('combined')"
+                        >
+                            🔄 Combined View
+                        </button>
+                    </nav>
+                </div>
+            </div>
+
+            <!-- System Audio Panel -->
+            <div id="panel-system" class="audio-panel">
+                <div class="mb-6 p-4 bg-blue-50 rounded-lg">
+                    <h3 class="text-sm font-medium text-blue-900 mb-2">System Audio Configuration</h3>
+                    <div class="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                            <span class="text-gray-600">Service:</span>
+                            <span class="font-mono ml-2">DeepGram Nova-2</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Format:</span>
+                            <span id="system-audio-format" class="font-mono ml-2">16kHz, 1ch</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Source:</span>
+                            <span class="ml-2">System Audio Output</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Language:</span>
+                            <span class="ml-2">English (US)</span>
+                        </div>
                     </div>
-                    <div>
-                        <span class="text-gray-600">Format:</span>
-                        <span id="audio-format" class="font-mono ml-2">16kHz, 1ch</span>
+                </div>
+
+                <div class="space-y-6">
+                    <!-- System Audio Controls -->
+                    <div class="flex gap-4 justify-center">
+                        <button 
+                            id="system-start-btn" 
+                            class="px-8 py-4 bg-green-500 text-white text-lg font-medium rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                            🖥️ Start System Audio
+                        </button>
+                        <button 
+                            id="system-stop-btn" 
+                            class="px-8 py-4 bg-red-500 text-white text-lg font-medium rounded-lg hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            disabled
+                        >
+                            ⏹️ Stop System Audio
+                        </button>
                     </div>
-                    <div>
-                        <span class="text-gray-600">Features:</span>
-                        <span class="ml-2">Smart formatting, Interim results</span>
+
+                    <!-- System Audio Status -->
+                    <div id="system-recording-status" class="text-center hidden">
+                        <div class="bg-green-100 text-green-800 p-4 rounded-lg">
+                            <div class="flex items-center justify-center gap-2 mb-2">
+                                <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                                <span class="font-medium">🔴 System Audio Live</span>
+                            </div>
+                            <div>Elapsed time: <span id="system-elapsed-time" class="font-mono text-lg">00:00</span></div>
+                            <div class="mt-2 text-sm">
+                                Status: <span id="system-output-path" class="font-mono">Streaming to DeepGram</span>
+                            </div>
+                        </div>
                     </div>
-                    <div>
-                        <span class="text-gray-600">Language:</span>
-                        <span class="ml-2">English (US)</span>
+
+                    <!-- System Audio Transcription -->
+                    <div id="system-transcription-section" class="mt-6 hidden">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-medium text-gray-700">System Audio Transcription</h3>
+                            <div id="system-transcription-status" class="text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded">
+                                Listening for system audio...
+                            </div>
+                        </div>
+                        
+                        <div id="system-transcription-display" class="bg-gray-50 border rounded-lg p-4 min-h-32 max-h-96 overflow-y-auto">
+                            <div id="system-transcription-text" class="text-base text-gray-800 whitespace-pre-wrap leading-relaxed">
+                                <span class="text-gray-400 italic">System audio transcription will appear here...</span>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-3 flex gap-2 justify-end">
+                            <button 
+                                onclick="clearTranscription('system')"
+                                class="text-xs px-3 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
+                            >
+                                Clear
+                            </button>
+                            <button 
+                                onclick="copyTranscription('system')"
+                                class="text-xs px-3 py-1 bg-blue-200 text-blue-600 rounded hover:bg-blue-300"
+                            >
+                                Copy
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Recording Controls -->
-            <div class="space-y-6">
-                <!-- Recording Controls -->
-                <div class="flex gap-4 justify-center">
-                    <button 
-                        id="start-btn" 
-                        class="px-8 py-4 bg-green-500 text-white text-lg font-medium rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                        🎙️ Start Streaming
-                    </button>
-                    <button 
-                        id="stop-btn" 
-                        class="px-8 py-4 bg-red-500 text-white text-lg font-medium rounded-lg hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                        disabled
-                    >
-                        ⏹️ Stop Streaming
-                    </button>
-                </div>
-
-                <!-- Recording Status -->
-                <div id="recording-status" class="text-center hidden">
-                    <div class="bg-green-100 text-green-800 p-4 rounded-lg">
-                        <div class="flex items-center justify-center gap-2 mb-2">
-                            <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
-                            <span class="font-medium">🔴 Live Streaming</span>
+            <!-- Microphone Panel -->
+            <div id="panel-microphone" class="audio-panel hidden">
+                <div class="mb-6 p-4 bg-green-50 rounded-lg">
+                    <h3 class="text-sm font-medium text-green-900 mb-2">Microphone Configuration</h3>
+                    <div class="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                            <span class="text-gray-600">Service:</span>
+                            <span class="font-mono ml-2">DeepGram Nova-2</span>
                         </div>
-                        <div>Elapsed time: <span id="elapsed-time" class="font-mono text-lg">00:00</span></div>
-                        <div class="mt-2 text-sm">
-                            Status: <span id="output-path" class="font-mono">Streaming to DeepGram</span>
+                        <div>
+                            <span class="text-gray-600">Format:</span>
+                            <span id="microphone-audio-format" class="font-mono ml-2">16kHz, 1ch</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Source:</span>
+                            <span class="ml-2">Default Microphone</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Language:</span>
+                            <span class="ml-2">English (US)</span>
                         </div>
                     </div>
                 </div>
 
-                <!-- Transcription Display -->
-                <div id="transcription-section" class="mt-6 hidden">
-                    <div class="flex items-center justify-between mb-3">
-                        <h3 class="text-lg font-medium text-gray-700">Live Transcription</h3>
-                        <div id="transcription-status" class="text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded">
-                            Listening for speech...
-                        </div>
-                    </div>
-                    
-                    <div id="transcription-display" class="bg-gray-50 border rounded-lg p-4 min-h-32 max-h-96 overflow-y-auto">
-                        <div id="transcription-text" class="text-base text-gray-800 whitespace-pre-wrap leading-relaxed">
-                            <span class="text-gray-400 italic">Transcription will appear here as you speak...</span>
-                        </div>
-                    </div>
-                    
-                    <!-- Transcription Controls -->
-                    <div class="mt-3 flex gap-2 justify-end">
+                <div class="space-y-6">
+                    <!-- Microphone Controls -->
+                    <div class="flex gap-4 justify-center">
                         <button 
-                            onclick="document.getElementById('transcription-text').textContent = 'Transcription cleared...'; document.getElementById('transcription-text').className += ' text-gray-400 italic'"
-                            class="text-xs px-3 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
+                            id="microphone-start-btn" 
+                            class="px-8 py-4 bg-green-500 text-white text-lg font-medium rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                         >
-                            Clear
+                            🎤 Start Microphone
                         </button>
                         <button 
-                            onclick="navigator.clipboard.writeText(document.getElementById('transcription-text').textContent)"
-                            class="text-xs px-3 py-1 bg-blue-200 text-blue-600 rounded hover:bg-blue-300"
+                            id="microphone-stop-btn" 
+                            class="px-8 py-4 bg-red-500 text-white text-lg font-medium rounded-lg hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            disabled
                         >
-                            Copy
+                            ⏹️ Stop Microphone
                         </button>
+                    </div>
+
+                    <!-- Microphone Status -->
+                    <div id="microphone-recording-status" class="text-center hidden">
+                        <div class="bg-green-100 text-green-800 p-4 rounded-lg">
+                            <div class="flex items-center justify-center gap-2 mb-2">
+                                <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                                <span class="font-medium">🔴 Microphone Live</span>
+                            </div>
+                            <div>Elapsed time: <span id="microphone-elapsed-time" class="font-mono text-lg">00:00</span></div>
+                            <div class="mt-2 text-sm">
+                                Status: <span id="microphone-output-path" class="font-mono">Streaming to DeepGram</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Microphone Transcription -->
+                    <div id="microphone-transcription-section" class="mt-6 hidden">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-medium text-gray-700">Microphone Transcription</h3>
+                            <div id="microphone-transcription-status" class="text-xs text-green-600 bg-green-100 px-2 py-1 rounded">
+                                Listening for speech...
+                            </div>
+                        </div>
+                        
+                        <div id="microphone-transcription-display" class="bg-gray-50 border rounded-lg p-4 min-h-32 max-h-96 overflow-y-auto">
+                            <div id="microphone-transcription-text" class="text-base text-gray-800 whitespace-pre-wrap leading-relaxed">
+                                <span class="text-gray-400 italic">Microphone transcription will appear here...</span>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-3 flex gap-2 justify-end">
+                            <button 
+                                onclick="clearTranscription('microphone')"
+                                class="text-xs px-3 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
+                            >
+                                Clear
+                            </button>
+                            <button 
+                                onclick="copyTranscription('microphone')"
+                                class="text-xs px-3 py-1 bg-blue-200 text-blue-600 rounded hover:bg-blue-300"
+                            >
+                                Copy
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Combined View Panel -->
+            <div id="panel-combined" class="audio-panel hidden">
+                <div class="mb-6 p-4 bg-purple-50 rounded-lg">
+                    <h3 class="text-sm font-medium text-purple-900 mb-2">Combined Audio Stream</h3>
+                    <div class="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                            <span class="text-gray-600">System Status:</span>
+                            <span id="combined-system-status" class="ml-2 font-medium">Stopped</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Microphone Status:</span>
+                            <span id="combined-microphone-status" class="ml-2 font-medium">Stopped</span>
+                        </div>
                     </div>
                 </div>
 
-                <!-- DeepGram Status -->
-                <div class="mt-6 text-center">
-                    <p class="text-xs text-gray-500">
-                        Powered by 
-                        <a href="https://deepgram.com" target="_blank" class="text-blue-600 hover:underline">DeepGram</a> 
-                        real-time speech recognition
-                    </p>
+                <div class="space-y-6">
+                    <!-- Quick Controls -->
+                    <div class="flex gap-4 justify-center">
+                        <button 
+                            id="start-both-btn" 
+                            class="px-8 py-4 bg-purple-500 text-white text-lg font-medium rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                            🚀 Start Both
+                        </button>
+                        <button 
+                            id="stop-all-btn" 
+                            class="px-8 py-4 bg-red-500 text-white text-lg font-medium rounded-lg hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                            ⏹️ Stop All
+                        </button>
+                    </div>
+
+                    <!-- Combined Transcription -->
+                    <div id="combined-transcription-section" class="mt-6">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-medium text-gray-700">Combined Transcription Stream</h3>
+                            <div class="text-xs text-purple-600 bg-purple-100 px-2 py-1 rounded">
+                                Real-time merged view
+                            </div>
+                        </div>
+                        
+                        <div id="combined-transcription-display" class="bg-gray-50 border rounded-lg p-4 min-h-64 max-h-96 overflow-y-auto">
+                            <div id="combined-transcription-text" class="text-base text-gray-800 whitespace-pre-wrap leading-relaxed">
+                                <span class="text-gray-400 italic">Combined transcription will appear here when either source is active...</span>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-3 flex gap-2 justify-end">
+                            <button 
+                                onclick="clearTranscription('combined')"
+                                class="text-xs px-3 py-1 bg-gray-200 text-gray-600 rounded hover:bg-gray-300"
+                            >
+                                Clear
+                            </button>
+                            <button 
+                                onclick="copyTranscription('combined')"
+                                class="text-xs px-3 py-1 bg-blue-200 text-blue-600 rounded hover:bg-blue-300"
+                            >
+                                Copy
+                            </button>
+                        </div>
+                    </div>
                 </div>
+            </div>
+
+            <!-- DeepGram Status -->
+            <div class="mt-6 text-center">
+                <p class="text-xs text-gray-500">
+                    Powered by 
+                    <a href="https://deepgram.com" target="_blank" class="text-blue-600 hover:underline">DeepGram</a> 
+                    real-time speech recognition
+                </p>
             </div>
         </div>
     </div>

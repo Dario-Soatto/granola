@@ -2,6 +2,11 @@ import AVFoundation
 import ScreenCaptureKit
 import Foundation
 
+enum AudioSource {
+    case system
+    case microphone
+}
+
 class RecorderCLI: NSObject, SCStreamDelegate, SCStreamOutput {
     static var screenCaptureStream: SCStream?
     var contentEligibleForSharing: SCShareableContent?
@@ -13,6 +18,11 @@ class RecorderCLI: NSObject, SCStreamDelegate, SCStreamOutput {
     var audioFormat: AVAudioFormat?
     let stderrHandle = FileHandle.standardError
     
+    // Microphone recording properties
+    var audioEngine: AVAudioEngine?
+    var microphoneNode: AVAudioInputNode?
+    var audioSource: AudioSource = .system
+    
     override init() {
         super.init()
         processCommandLineArguments()
@@ -23,25 +33,49 @@ class RecorderCLI: NSObject, SCStreamDelegate, SCStreamOutput {
         
         // Check for permission request
         if arguments.contains("--check-permissions") {
-            PermissionsRequester.requestScreenCaptureAccess { granted in
-                if granted {
-                    ResponseHandler.returnResponse(["code": "PERMISSION_GRANTED"])
-                } else {
-                    ResponseHandler.returnResponse(["code": "PERMISSION_DENIED"])
+            if arguments.contains("--microphone") {
+                PermissionsRequester.requestMicrophoneAccess { granted in
+                    if granted {
+                        ResponseHandler.returnResponse(["code": "PERMISSION_GRANTED", "source": "microphone"])
+                    } else {
+                        ResponseHandler.returnResponse(["code": "PERMISSION_DENIED", "source": "microphone"])
+                    }
+                }
+            } else {
+                PermissionsRequester.requestScreenCaptureAccess { granted in
+                    if granted {
+                        ResponseHandler.returnResponse(["code": "PERMISSION_GRANTED", "source": "system"])
+                    } else {
+                        ResponseHandler.returnResponse(["code": "PERMISSION_DENIED", "source": "system"])
+                    }
                 }
             }
             return
         }
         
-        // For streaming, we don't need path or filename arguments
-        if !arguments.contains("--stream") {
-            ResponseHandler.returnResponse(["code": "INVALID_ARGUMENTS", "error": "Use --stream to start audio streaming"])
+        // Determine audio source
+        if arguments.contains("--microphone") {
+            audioSource = .microphone
+            if !arguments.contains("--stream") {
+                ResponseHandler.returnResponse(["code": "INVALID_ARGUMENTS", "error": "Use --stream with --microphone to start microphone streaming"])
+                return
+            }
+        } else if arguments.contains("--stream") {
+            audioSource = .system
+        } else {
+            ResponseHandler.returnResponse(["code": "INVALID_ARGUMENTS", "error": "Use --stream for system audio or --stream --microphone for microphone audio"])
             return
         }
     }
 
     func executeRecordingProcess() {
-        self.updateAvailableContent()
+        switch audioSource {
+        case .system:
+            self.updateAvailableContent()
+        case .microphone:
+            self.setupMicrophoneRecording()
+        }
+        
         setupInterruptSignalHandler()
         setupStreamFunctionTimeout()
         semaphoreRecordingStopped.wait()
@@ -71,12 +105,15 @@ class RecorderCLI: NSObject, SCStreamDelegate, SCStreamOutput {
                 ResponseHandler.returnResponse([
                     "code": "RECORDING_STARTED", 
                     "timestamp": formattedTimestamp,
-                    "streaming": true
+                    "streaming": true,
+                    "source": self.audioSource == .system ? "system" : "microphone"
                 ], shouldExitProcess: false)
             }
         }
     }
 
+    // MARK: - System Audio Recording (existing functionality)
+    
     func updateAvailableContent() {
         SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: true) { [weak self] content, error in
             guard let self = self else { return }
@@ -142,6 +179,7 @@ class RecorderCLI: NSObject, SCStreamDelegate, SCStreamOutput {
                         "code": "RECORDING_STARTED",
                         "timestamp": formattedTimestamp,
                         "streaming": true,
+                        "source": "system",
                         "audio_format": [
                             "sample_rate": asbd.pointee.mSampleRate,
                             "channels": asbd.pointee.mChannelsPerFrame,
@@ -158,11 +196,138 @@ class RecorderCLI: NSObject, SCStreamDelegate, SCStreamOutput {
         // Convert sample buffer to raw PCM data and stream it
         guard let audioBuffer = sampleBuffer.asPCMBuffer, sampleBuffer.isValid else { return }
         
-        // Stream the raw audio data to stdout
-        streamAudioData(from: audioBuffer)
+        // Stream the raw audio data to stdout with source identification
+        streamAudioData(from: audioBuffer, source: .system)
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        ResponseHandler.returnResponse(["code": "STREAM_ERROR", "error": error.localizedDescription], shouldExitProcess: false)
+        RecorderCLI.terminateRecording()
+        semaphoreRecordingStopped.signal()
+    }
+
+    // MARK: - Microphone Recording (new functionality)
+    
+    func setupMicrophoneRecording() {
+        audioEngine = AVAudioEngine()
+        
+        guard let audioEngine = audioEngine else {
+            ResponseHandler.returnResponse(["code": "MICROPHONE_SETUP_FAILED", "error": "Failed to create audio engine"])
+            return
+        }
+        
+        microphoneNode = audioEngine.inputNode
+        
+        guard let microphoneNode = microphoneNode else {
+            ResponseHandler.returnResponse(["code": "MICROPHONE_SETUP_FAILED", "error": "Failed to get microphone input node"])
+            return
+        }
+        
+        // Use the microphone's native format to avoid sample rate mismatch
+        let inputFormat = microphoneNode.inputFormat(forBus: 0)
+        
+        // Store the native format for reporting
+        self.audioFormat = inputFormat
+        
+        // Install tap using the native format
+        microphoneNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] (buffer, time) in
+            guard let self = self else { return }
+            
+            // Send recording started message on first audio sample
+            if !self.recordingStarted {
+                self.recordingStarted = true
+                let timestamp = Date()
+                let formattedTimestamp = ISO8601DateFormatter().string(from: timestamp)
+                
+                let audioInfo = [
+                    "code": "RECORDING_STARTED",
+                    "timestamp": formattedTimestamp,
+                    "streaming": true,
+                    "source": "microphone",
+                    "audio_format": [
+                        "sample_rate": inputFormat.sampleRate,
+                        "channels": inputFormat.channelCount,
+                        "bits_per_channel": 16, // We convert to Int16
+                        "format_id": kAudioFormatLinearPCM
+                    ]
+                ] as [String : Any]
+                
+                ResponseHandler.returnResponse(audioInfo, shouldExitProcess: false)
+            }
+            
+            // Convert to our target format if needed and stream the microphone audio data
+            self.streamMicrophoneAudioData(from: buffer, originalFormat: inputFormat)
+        }
+        
+        // Start the audio engine
+        do {
+            try audioEngine.start()
+        } catch {
+            ResponseHandler.returnResponse(["code": "MICROPHONE_START_FAILED", "error": error.localizedDescription])
+        }
     }
     
-    func streamAudioData(from buffer: AVAudioPCMBuffer) {
+    func streamMicrophoneAudioData(from buffer: AVAudioPCMBuffer, originalFormat: AVAudioFormat) {
+        // If the buffer is already in a compatible format, use it directly
+        if originalFormat.sampleRate == 16000 && originalFormat.channelCount == 1 {
+            streamAudioData(from: buffer, source: .microphone)
+            return
+        }
+        
+        // Otherwise, we need to convert the audio format
+        // For now, we'll resample and convert to mono if needed
+        guard let convertedBuffer = convertAudioBuffer(buffer, 
+                                                      from: originalFormat, 
+                                                      toSampleRate: 16000, 
+                                                      toChannels: 1) else {
+            return
+        }
+        
+        streamAudioData(from: convertedBuffer, source: .microphone)
+    }
+    
+    func convertAudioBuffer(_ inputBuffer: AVAudioPCMBuffer, 
+                           from inputFormat: AVAudioFormat, 
+                           toSampleRate targetSampleRate: Double, 
+                           toChannels targetChannels: UInt32) -> AVAudioPCMBuffer? {
+        
+        // Create target format
+        guard let targetFormat = AVAudioFormat(standardFormatWithSampleRate: targetSampleRate, 
+                                              channels: AVAudioChannelCount(targetChannels)) else {
+            return nil
+        }
+        
+        // Create converter
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            return nil
+        }
+        
+        // Calculate output buffer size
+        let inputFrameCount = inputBuffer.frameLength
+        let outputFrameCount = UInt32(Double(inputFrameCount) * targetSampleRate / inputFormat.sampleRate)
+        
+        // Create output buffer
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputFrameCount) else {
+            return nil
+        }
+        
+        // Perform conversion
+        var error: NSError?
+        let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+        
+        converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+        
+        if error != nil {
+            return nil
+        }
+        
+        return outputBuffer
+    }
+    
+    func streamAudioData(from buffer: AVAudioPCMBuffer, source: AudioSource) {
         guard let floatChannelData = buffer.floatChannelData else { return }
         
         let frameLength = Int(buffer.frameLength)
@@ -186,27 +351,27 @@ class RecorderCLI: NSObject, SCStreamDelegate, SCStreamOutput {
             Data(buffer: buffer)
         }
         
-        // Write length prefix (4 bytes) followed by audio data
-        var lengthBytes = UInt32(audioDataBytes.count).bigEndian
+        // Add source identifier byte (0x01 for system, 0x02 for microphone)
+        let sourceIdentifier: UInt8 = source == .system ? 0x01 : 0x02
+        let sourceData = Data([sourceIdentifier])
+        
+        // Write length prefix (4 bytes) + source (1 byte) + audio data
+        var lengthBytes = UInt32(audioDataBytes.count + 1).bigEndian // +1 for source byte
         let lengthData = Data(bytes: &lengthBytes, count: 4)
         
         // Write to stdout (Node.js will read this)
         FileHandle.standardOutput.write(lengthData)
+        FileHandle.standardOutput.write(sourceData)
         FileHandle.standardOutput.write(audioDataBytes)
         
         // Debug info to stderr (so it doesn't interfere with audio stream)
         if frameLength > 0 {
-            let debugInfo = "Streamed \(audioDataBytes.count) bytes (\(frameLength) frames)\n"
+            let sourceName = source == .system ? "system" : "microphone"
+            let debugInfo = "Streamed \(audioDataBytes.count) bytes (\(frameLength) frames) from \(sourceName)\n"
             if let debugData = debugInfo.data(using: .utf8) {
                 stderrHandle.write(debugData)
             }
         }
-    }
-
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        ResponseHandler.returnResponse(["code": "STREAM_ERROR", "error": error.localizedDescription], shouldExitProcess: false)
-        RecorderCLI.terminateRecording()
-        semaphoreRecordingStopped.signal()
     }
 
     static func terminateRecording() {
@@ -222,6 +387,36 @@ class PermissionsRequester {
             completion(result)
         } else {
             completion(true)
+        }
+    }
+    
+    static func requestMicrophoneAccess(completion: @escaping (Bool) -> Void) {
+        // On macOS, we use AVAudioEngine permission model
+        // The system will automatically prompt for microphone permission when we try to access it
+        // For now, we'll return true and let the system handle the permission prompt
+        
+        // Check if we can create an AVAudioEngine and access input node
+        let audioEngine = AVAudioEngine()
+        let inputNode = audioEngine.inputNode
+        
+        // Try to install a temporary tap to trigger permission request
+        let format = inputNode.inputFormat(forBus: 0)
+        
+        do {
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { _, _ in
+                // This tap will trigger the microphone permission prompt if needed
+            }
+            
+            try audioEngine.start()
+            
+            // If we get here, permission was granted
+            audioEngine.stop()
+            inputNode.removeTap(onBus: 0)
+            completion(true)
+            
+        } catch {
+            // Permission denied or other error
+            completion(false)
         }
     }
 }
