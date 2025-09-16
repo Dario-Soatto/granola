@@ -1,16 +1,105 @@
-# Electron System Audio Capture & Recording for MacOS
-Hey 👋! Luke/YAE here - I just wanted to give another huge props to Sebastian for helping me to make this, for a little context this project came about through my own frustrations at the Electron documentation not supporting a clean MacOS experience for system audio capture [documentation found here](https://www.electronjs.org/docs/latest/api/desktop-capturer#caveats). And as a result I set about to create a clean way to do so - the requirements being: 
+# Audio Stream Transcriber
 
-1. No user setup except for what they'll be used to ex. permissions
-2. It couldn't feel too far from a native experience
+A real-time audio transcription application built on Electron that captures system audio on macOS and provides live transcription using DeepGram's streaming API.
 
-I created an original prototype of what this would look like, but for the life of me I couldn't get the Swift code working - that's where Sebastian came in to take over from me after many chats. Sebastian was compensated for his work on this project, and we mutually agreed that it should be fully open source and not backed by any corporate sponsors (please do not reach out for that). And I'm proud to say, he's smashed it out of the park - far beyond what I was expecting of him!
+## Overview
 
-As a side note - he's open to work, reach out to him here: https://www.linkedin.com/in/sebastian-w%C4%85sik-b23840174/ I highly recommend him! 
+This project extends the excellent [Electron System Audio Capture & Recording for MacOS](https://github.com/lukeyaegerjones/electron-system-audio-recorder) to add real-time transcription capabilities. It provides a seamless way to capture and transcribe system audio with minimal user setup beyond standard permissions.
 
-The project is available under the MIT license, however, you're unlikely to get any support - you can definetly reach out and I'll do my best but we're both busy people and the point of this project was to encourage the adoption and pushing of Electron.
+## Features
 
-To set up the project, please check out package.json for instructions and dependencies.
+- **System Audio Capture**: Clean macOS system audio recording using Swift integration
+- **Real-time Transcription**: Live audio transcription powered by DeepGram's streaming API
+- **Multiple Interfaces**: Both Electron desktop app and web interface options
+- **Native Experience**: Minimal setup with familiar macOS permission handling
+- **WebSocket Streaming**: Real-time communication between audio capture and transcription services
 
-Tags:
-MacOS System Audio Capture Electron
+## Prerequisites
+
+- macOS (required for system audio capture)
+- Node.js
+- DeepGram API key for transcription services
+
+## Setup
+
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd audio-stream-transcriber
+   ```
+
+2. **Install dependencies**
+   ```bash
+   npm install
+   ```
+
+3. **Configure DeepGram API**
+   Create a `.env` file in the root directory:
+   ```
+   DEEPGRAM_API_KEY=your_deepgram_api_key_here
+   ```
+
+4. **Build Swift components**
+   ```bash
+   npm run swift:make
+   ```
+
+## Usage
+
+### Desktop Application (Electron)
+```bash
+npm run dev
+```
+
+### Web Interface
+```bash
+npm run web
+```
+Then open `http://localhost:3000` in your browser.
+
+## Project Structure
+
+```
+src/
+├── electron/          # Electron main process and renderers
+│   ├── main.js        # Main Electron process
+│   ├── screens/       # UI screens (recording, permissions)
+│   └── utils/         # Permission and recording utilities
+├── server/            # Express server for web interface
+│   └── app.js         # WebSocket and HTTP server
+├── swift/             # Swift audio capture implementation
+│   └── Recorder.swift # Core audio recording functionality
+└── web/               # Web interface files
+    ├── app.js         # Client-side JavaScript
+    └── index.html     # Web UI
+```
+
+## Scripts
+
+- `npm run dev` - Start Electron development app
+- `npm run web` - Start web server
+- `npm run swift:make` - Compile Swift audio recorder
+- `npm run electron:package` - Package Electron app
+- `npm run electron:make` - Create distributable builds
+
+## Credits & Acknowledgments
+
+This project builds upon the foundational work of the **Electron System Audio Capture & Recording for MacOS** project:
+
+- **Original Concept**: Luke/YAE - Created the initial vision for clean macOS system audio capture in Electron
+- **Swift Implementation**: Sebastian Wąsik - Developed the core Swift audio capture functionality
+- **LinkedIn**: [Sebastian Wąsik](https://www.linkedin.com/in/sebastian-w%C4%85sik-b23840174/)
+
+The original project addressed the limitations in Electron's documentation for macOS system audio capture and provided a clean, native-feeling solution with minimal user setup requirements.
+
+## License
+
+MIT License - This project maintains the open-source spirit of the original work, encouraging adoption and advancement of Electron-based audio applications.
+
+## Support
+
+This is an open-source project built for the community. While we'll do our best to help with issues, please understand that support is provided on a best-effort basis.
+
+## Tags
+
+macOS, System Audio Capture, Electron, Real-time Transcription, DeepGram, Swift, Audio Processing, WebSocket Streaming
